@@ -18,10 +18,20 @@ from rhythm import FIBONACCI, MusicTracker  # noqa: E402
 
 SR, BLOCK = 44100, 1024
 
+if len(sys.argv) < 2:
+    sys.exit(f"usage: {Path(sys.argv[0]).name} <audio file> [seconds-per-row]")
+
 path = str(Path(sys.argv[1]).expanduser())
 row_s = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
-raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"],
-                     capture_output=True, check=True).stdout
+# ffmpeg does the decoding, so this reads whatever it reads.
+try:
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path, "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"],
+        capture_output=True, check=True).stdout
+except FileNotFoundError:
+    sys.exit("needs ffmpeg on PATH to decode audio: sudo apt install ffmpeg")
+except subprocess.CalledProcessError as e:
+    sys.exit(f"ffmpeg could not read {path}:\n{e.stderr.decode(errors='replace').strip()}")
 x = np.frombuffer(raw, dtype="<f4")
 print(f"{Path(path).name}: {len(x) / SR:.0f} s")
 

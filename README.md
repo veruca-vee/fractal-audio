@@ -13,6 +13,7 @@ spinning.
 
 - `sequences.py`  — the three sequence generators + golden-angle spiral walk
 - `phi_paths.py` — the path `c` follows in each of the three modes
+- `pw_monitor.py` — finds the PipeWire sink whose monitor carries system output
 - `rhythm.py` — the music analysis: levels, onsets, pulse, repeat length, pitch, sections
 - `julia.frag` / `julia.vert` — the GLSL Julia set shader
 - `main.py` — ties audio capture to the shader via moderngl, and writes the session log
@@ -40,7 +41,7 @@ Inside the box:
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-pip python3-venv \
-    libgl1 libglvnd0 mesa-utils \
+    libgl1 libglvnd0 libgl-dev mesa-utils \
     libportaudio2 portaudio19-dev \
     pipewire-audio-client-libraries
 
@@ -51,44 +52,79 @@ source venv/bin/activate
 pip install moderngl moderngl-window numpy sounddevice
 ```
 
-### This machine (Ubuntu 26.04 box, Python 3.14)
+### This machine (Debian trixie distrobox, Python 3.13)
 
-There's no prebuilt `glcontext` wheel for Python 3.14, so pip builds it from
-source and needs the X11/GL headers first:
+The box is `fractal-box` (`debian:trixie`) on a Bluefin host, with the host's
+Mesa stack bound in — `glxinfo` reports `Mesa Intel(R) UHD Graphics 600`
+and GL 4.6, so rendering is on the real GPU, around 55 fps at the defaults.
+
+`libgl-dev` is not optional, even though nothing here is compiled: moderngl
+loads GL with `ctypes.CDLL("libGL.so")`, the unversioned symlink that only the
+dev package ships. With just `libgl1` you get `libGL.so.1`, `glxinfo` works
+fine, and moderngl still dies with
+`OSError: libGL.so: cannot open shared object file`.
 
 ```bash
 sudo apt install -y python3-venv python3-pip python3-dev \
-    libportaudio2 portaudio19-dev mesa-utils pulseaudio-utils \
+    libportaudio2 portaudio19-dev mesa-utils \
     libx11-dev libgl-dev libegl-dev
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ```
 
+If you build the venv on a Python with no prebuilt `glcontext` wheel (3.14 at
+the time of writing), pip compiles it from source, which is what the X11/GL
+headers above are for.
+
 ## Routing PipeWire audio in
 
-You want the *monitor* of whatever's playing your music (e.g. the sink
-monitor), not a mic. From inside the box (PipeWire client libs are shared
-with the host session):
+You want the *monitor* of whatever's playing the music, not a mic. Pass
+`--device monitor` and it finds it for you:
 
-```bash
+```fish
+python main.py --device monitor
+```
+
+It prints which sink it attached to, e.g. `capturing the monitor of
+alsa_output.pci-0000_00_0e.0.analog-stereo (node 47)`. With more than one
+output, `--device monitor=hdmi` picks the first sink whose name contains
+that fragment; plain `monitor` follows the current default sink.
+
+It has to find it for you, because you can't just name it. Listing devices:
+
+```fish
 python3 -c "import sounddevice as sd; print(sd.query_devices())"
 ```
 
-Look for an entry with "Monitor" in the name — that's your loopback of
-system output. Note its index or exact name, then either export it or pass
-it directly:
+...shows no monitor at all — only `default`, `pipewire`, `sysdefault` and the
+raw `hw:` cards. PortAudio (under sounddevice) builds its list from ALSA and
+has no PulseAudio backend, so PulseAudio-style source names
+(`alsa_output.<card>.analog-stereo.monitor`, the kind `pactl list sources`
+prints) are invisible to it. The ALSA `pipewire` device *is* there, but it
+follows the default **source** — the microphone.
 
-```bash
-python3 main.py --device "Monitor of Built-in Audio Analog Stereo"
-# or by index:
-python3 main.py --device 4
-```
+What works is the pipewire ALSA plugin's own target, read from
+`$PIPEWIRE_NODE`: capture against a **sink** and PipeWire links you to that
+sink's monitor ports. `pw_monitor.py` resolves the sink to a node id and sets
+it. Two sharp edges it exists to handle:
 
-If nothing shows a monitor device, PipeWire's pulse-compat layer may not be
-exposing it to the container — run `pactl list sources short` on the host
-first to confirm the monitor source name exists, then check that
-`pipewire-pulse` is reachable from inside the box (it usually is, since
-distrobox shares the host's runtime dir by default).
+- That variable takes only a **numeric node id** here. A node *name* is
+  silently ignored and you get the microphone — and a mic next to playing
+  speakers shows plenty of signal, so it looks like it worked. Check the
+  routing, not the level: `pw-link -l` should show your stream fed by
+  `...analog-stereo:monitor_FL`, not `alsa_input...:capture_FL`. For the same
+  reason `--device monitor` fails loudly rather than falling back.
+- Node ids are handed out at runtime and change across reboots and device
+  changes, so the id is resolved at launch instead of written down.
+
+An `~/.asoundrc` with a `type pipewire` PCM and `capture_node` is the tidier
+answer on paper, and it does get the PCM enumerated (via its `hint` block),
+but this client build (1.4.2 against a 1.6.8 server) ignores `capture_node`
+and hands back the mic. Hence the env var.
+
+If `--device monitor` reports no sinks, PipeWire isn't reachable from the box:
+check that `pw-dump` runs and that `/run/user/1000/pipewire-0` is present
+(distrobox shares the host's runtime dir by default).
 
 ## Running
 
@@ -96,18 +132,18 @@ distrobox shares the host's runtime dir by default).
 python3 main.py --mode 1 --terms 60 --angle 137.5
 ```
 
-On this machine the monitor source is
-`alsa_output.pci-0000_00_0e.0.analog-stereo.monitor`, so:
+So on this machine:
 
 ```fish
 source venv/bin/activate.fish
-python main.py --device analog-stereo.monitor
+python main.py --device monitor
 ```
 
 It starts fullscreen.
 
 | Flag | Default | Effect |
 |---|---|---|
+| `--device` | default input | `monitor` for the monitor of system output, `monitor=<fragment>` to pick a sink, else a sounddevice name or index |
 | `--mode` | `1` | starting mode (see keys below) |
 | `--scale` | `0.75` | render resolution relative to the window; lower is faster, softer |
 | `--iters` | `128` | max Julia iterations; lower is faster, higher is more detail |
@@ -160,6 +196,9 @@ Check the tracker against a track whose structure you know:
 ```fish
 ./venv/bin/python tools/check_rhythm.py "~/Music/some song.mp3" 15
 ```
+
+It shells out to `ffmpeg` to decode, so `sudo apt install ffmpeg` first (the
+live app doesn't need it — only this tool does).
 
 It prints the pulse, repeat length, onset rates, dominant note and section
 count every 15 s, then how often each repeat length came up and whether it

@@ -46,6 +46,7 @@ Keys while running:
 import cmath
 import csv
 import math
+import os
 import sys
 from collections import Counter
 from datetime import datetime
@@ -58,6 +59,7 @@ import moderngl_window as mglw
 import sounddevice as sd
 
 import phi_paths
+import pw_monitor
 from rhythm import FIBONACCI, MusicTracker, wrap_half
 from sequences import GOLDEN_ANGLE_DEG
 
@@ -137,6 +139,41 @@ void main() {
     fragColor = vec4(c.rgb, c.a * u_alpha);
 }
 """
+
+
+def resolve_device(spec):
+    """Turn a --device value into something sounddevice can open.
+
+    "monitor" aims the stream at the PipeWire monitor of system output, i.e.
+    whatever you are listening to, via pw_monitor; "monitor=<fragment>" picks a
+    sink other than the default one by part of its name. Anything else is passed
+    through untouched, except an all-digit string, which becomes an index
+    because sounddevice would otherwise read it as a device name.
+    """
+    if spec is None:
+        return None
+    if spec.isdigit():
+        return int(spec)
+    head, _, hint = spec.partition("=")
+    if head.lower() != "monitor":
+        return spec
+
+    found = pw_monitor.sink_node_id(hint or None)
+    if found is None:
+        sinks = pw_monitor.describe_sinks()
+        detail = (
+            "available sinks:\n  " + "\n  ".join(sinks) if sinks
+            else "no sinks found at all -- is PipeWire reachable? try `pw-dump`."
+        )
+        # Refuse rather than fall through: the fallback is the microphone, and a
+        # mic next to playing speakers looks enough like the monitor to fool you.
+        raise SystemExit(f"--device {spec}: no matching PipeWire sink.\n{detail}")
+
+    node_id, node_name = found
+    # Read by the pipewire ALSA plugin when the stream is opened below.
+    os.environ["PIPEWIRE_NODE"] = str(node_id)
+    print(f"capturing the monitor of {node_name} (node {node_id})", file=sys.stderr)
+    return "pipewire"
 
 
 class AudioAnalyzer:
@@ -241,7 +278,7 @@ class FractalWindow(mglw.WindowConfig):
         parser.add_argument("--mode", type=int, choices=sorted(MODE_NAMES), default=1)
         parser.add_argument("--terms", type=int, default=60, help="mode 1: sequence length; more terms = slower sweep outward")
         parser.add_argument("--angle", type=float, default=GOLDEN_ANGLE_DEG)
-        parser.add_argument("--device", type=str, default=None, help="sounddevice input device name or index (see README for finding your PipeWire monitor)")
+        parser.add_argument("--device", type=str, default=None, help="input device: \"monitor\" for the PipeWire monitor of system output (or monitor=<sink name fragment>), else a sounddevice name or index")
         parser.add_argument("--scale", type=float, default=0.75, help="render resolution relative to the window; lower is faster")
         parser.add_argument("--iters", type=int, default=128, help="max Julia iterations; lower is faster, higher is more detail")
         parser.add_argument("--fps", action="store_true", help="print frames per second to stderr every 5 seconds")
@@ -285,10 +322,7 @@ class FractalWindow(mglw.WindowConfig):
         self.vbo = self.ctx.buffer(quad.tobytes())
         self.vao = self.ctx.simple_vertex_array(self.prog, self.vbo, "in_position")
 
-        device = self.args.device
-        if device is not None and device.isdigit():
-            device = int(device)  # sounddevice treats a digit string as a name, not an index
-        self.audio = AudioAnalyzer(device=device)
+        self.audio = AudioAnalyzer(device=resolve_device(self.args.device))
         self.tr = self.audio.tracker
         self.audio.start()
 
