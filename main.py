@@ -65,11 +65,14 @@ Keys while running:
     esc         quit
 
   with --play:
+    click       bring the transport up; click away to put it back; click a
+                button to use it. Position in the track is the light running
+                round the edge of the screen, which is always on.
     m           play/pause the music (space pauses the path, not the sound)
     n / b       next / previous track
     left/right  seek 10 s back / forward
     up / down   volume
-    i           show what's playing, and how far in
+    i           show/hide the transport, for when the mouse isn't to hand
 """
 
 import cmath
@@ -87,6 +90,7 @@ from PIL import Image, ImageDraw, ImageFont
 import moderngl_window as mglw
 import sounddevice as sd
 
+import overlay
 import phi_paths
 import player
 import pw_monitor
@@ -179,29 +183,6 @@ VOLUME_STEP = 5.0         # percent per up/down press
 TOAST_SECONDS = 1.5
 TOAST_FADE = 0.4
 TOAST_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-
-TOAST_VERT = """#version 330
-uniform vec4 u_rect;  // x0, y0, x1, y1 in NDC
-in vec2 in_position;
-out vec2 v_uv;
-void main() {
-    v_uv = in_position * 0.5 + 0.5;
-    vec2 p = mix(u_rect.xy, u_rect.zw, v_uv);
-    gl_Position = vec4(p, 0.0, 1.0);
-}
-"""
-
-TOAST_FRAG = """#version 330
-uniform sampler2D u_tex;
-uniform float u_alpha;
-in vec2 v_uv;
-out vec4 fragColor;
-void main() {
-    vec4 c = texture(u_tex, v_uv);
-    fragColor = vec4(c.rgb, c.a * u_alpha);
-}
-"""
-
 
 def resolve_device(spec):
     """Turn a --device value into something sounddevice can open.
@@ -430,7 +411,8 @@ class FractalWindow(mglw.WindowConfig):
 
         self.player = None
         self.player_state = None
-        self.track_seen = -1
+        self.track_seen = 0
+        self.overlay = None
         if self.args.play:
             self._start_player()
 
@@ -439,7 +421,8 @@ class FractalWindow(mglw.WindowConfig):
         self.hue_steps = self.hue_smooth = 0.0
         self.seen = dict(kick=0, snare=0, hat=0, bass=0, section=0)
 
-        self.toast_prog = self.ctx.program(vertex_shader=TOAST_VERT, fragment_shader=TOAST_FRAG)
+        self.toast_prog = self.ctx.program(vertex_shader=overlay.QUAD_VERT,
+                                           fragment_shader=overlay.QUAD_FRAG)
         self.toast_vao = self.ctx.simple_vertex_array(self.toast_prog, self.vbo, "in_position")
         self.toast_tex = None
         self.toast_size = (1, 1)
@@ -516,6 +499,7 @@ class FractalWindow(mglw.WindowConfig):
             except ValueError:
                 pass  # that track isn't in this playlist any more
         p.play_index(start_at, seek=seek)
+        self.overlay = overlay.NowPlayingOverlay(self.ctx, self.vbo)
         print(f"--play: {len(tracks)} tracks, starting at {start_at + 1}", file=sys.stderr)
 
     def show_toast(self, text):
@@ -692,13 +676,19 @@ class FractalWindow(mglw.WindowConfig):
         return c, power, 0j, 1.0
 
     def _poll_player(self):
-        """Announce a track when it changes. Returns True on the frame it
-        does, so the render loop can treat it as the scene change it is."""
-        if self.player is None or self.player.track_serial == self.track_seen:
+        """Announce the track when it changes. Returns True on the frame it
+        does, so the render loop can treat it as the scene change it is.
+
+        Serial 0 is "mpv hasn't loaded anything yet", which is not a change
+        and whose title would be "nothing playing"; every load after that is
+        announced, the first one included, since arriving mid-album and being
+        told what's on is the point.
+        """
+        p = self.player
+        if p is None or not p.track_serial or p.track_serial == self.track_seen:
             return False
-        self.track_seen = self.player.track_serial
-        if self.track_seen:  # not the first load, which nobody has seen yet
-            self.show_toast(self.player.title())
+        self.track_seen = p.track_serial
+        self.show_toast(p.title())
         return True
 
     def _now_playing(self):
@@ -838,9 +828,21 @@ class FractalWindow(mglw.WindowConfig):
             p.add_volume(VOLUME_STEP if key == keys.UP else -VOLUME_STEP)
             self.show_toast(f"Volume  {p.state.get('volume', 0):.0f}%")
         elif key == keys.I:
-            pos, dur = p.position, p.duration
-            self.show_toast(f"{p.title()}   {pos // 60:.0f}:{pos % 60:04.1f}"
-                            + (f" / {dur // 60:.0f}:{dur % 60:04.1f}" if dur else ""))
+            # The same thing a click does, for when the mouse isn't to hand.
+            self.overlay.toggle(self.now)
+
+    def on_mouse_press_event(self, x, y, button):
+        """A click brings the transport up, another puts it away, and one on
+        a button does what it says."""
+        if self.overlay is None:
+            return
+        hit = self.overlay.click(x, y, self.wnd.size, self.now)
+        if hit == "play_pause":
+            self.player.toggle_pause()
+        elif hit == "next":
+            self.player.next_track()
+        elif hit == "prev":
+            self.player.prev_track()
 
     def on_render(self, time, frame_time):
         self.now = time
@@ -914,6 +916,9 @@ class FractalWindow(mglw.WindowConfig):
         self.ctx.clear(0.0, 0.0, 0.0)
         self._draw_quad(self.scene_tex, (-1.0, -1.0, 1.0, 1.0), 1.0)
 
+        if self.overlay is not None:
+            self.overlay.draw(self.player, time, self.wnd.size, self.wnd.buffer_size)
+
         remaining = self.toast_until - time
         if self.toast_tex is not None and remaining > 0:
             bw, bh = self.wnd.buffer_size
@@ -928,6 +933,8 @@ class FractalWindow(mglw.WindowConfig):
 
     def on_close(self):
         self.audio.stop()
+        if self.overlay is not None:
+            self.overlay.release()
         if self.player is not None:
             # Saved before the quit, while the position can still be read.
             if self.player_state is not None and self.player.alive:

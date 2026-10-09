@@ -19,6 +19,7 @@ changes. The view is flat and slowly spinning.
 - `sequences.py`  — the integer sequences (Fibonacci, Lucas, Pell, bronze, tribonacci, Padovan, Perrin, Jacobsthal, and the two hand-rolled variants), the metallic means and their divergence angles, + the golden-angle spiral walk
 - `phi_paths.py` — the path `c` follows in each of the seven modes, and which map the shader iterates for each
 - `player.py` — mpv as the player engine, over its JSON IPC socket: library scan, playlist, transport, and the resume file
+- `overlay.py` — the now-playing overlay: the edge light, the transport buttons, and the textured-quad shader the toasts use too
 - `pw_monitor.py` — finds the PipeWire sink whose monitor carries system output
 - `rhythm.py` — the music analysis: levels, onsets, pulse, repeat length, pitch, sections
 - `julia.frag` / `julia.vert` — the GLSL Julia set shader
@@ -148,6 +149,19 @@ how long, how far in — so a log row says *where in which track* something was
 heard, the session summary ends with the tracks you spent longest on, and a
 new track moves the palette on the way a section change does.
 
+Where you are in the track is the light that runs round the edge of the
+screen: the whole border carries a faint line, the part already played is
+brighter, and a head you can follow sits at the current position. It is on
+whenever something is playing, and dims while paused. Nothing is laid over
+the fractal for it — the frame *is* the progress bar.
+
+The transport is not on until you ask. A click anywhere brings up play/pause,
+previous and next with the title and time above them; a click anywhere else
+puts them away; a click on a button does what it says and leaves them up.
+That is mpv's on-screen controller without the auto-hide timer, which on
+something you watch for minutes at a time is a distraction rather than a
+convenience. `i` does the same as a click, for when the mouse isn't to hand.
+
 It picks up where the last session stopped (track and position, and the
 volume), unless `--no-resume`. That's kept in `.player_state.json`, which is
 rewritten on quit and is disposable — delete it and you start at the top.
@@ -212,11 +226,12 @@ With `--play`, the transport too:
 
 | Key | Effect |
 |---|---|
+| click | bring the transport up; click away to put it back; click a button to use it |
 | `m` | play/pause the music. Not `space`, which pauses the path: stopping one while the other keeps going is worth being able to ask for |
 | `n` / `b` | next / previous track |
 | `←` `→` | seek 10 s back / forward |
 | `↑` `↓` | volume, 5% a press |
-| `i` | show what's playing and how far in |
+| `i` | show/hide the transport, for when the mouse isn't to hand |
 
 ## What follows what
 
