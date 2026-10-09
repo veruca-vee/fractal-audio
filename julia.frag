@@ -3,6 +3,8 @@
 uniform vec2 u_resolution;
 uniform vec2 u_c;          // Julia constant, driven by the current mode's path
 uniform int u_power;       // d in z^d + c: 2, 3, 5 or 8
+uniform int u_formula;     // which map to iterate; see the FORMULA_* below
+uniform vec2 u_p;          // mode 6 only: the Phoenix map's memory coefficient
 uniform vec2 u_center;     // plane point at the middle of the view
 uniform float u_zoom;      // view scale; smaller = zoomed in
 uniform float u_amp;       // overall audio amplitude, 0..1
@@ -36,6 +38,12 @@ out vec4 fragColor;
 
 const float TAU = 6.28318530718;
 
+// Must match phi_paths.FORMULA_*.
+const int FORMULA_POWER = 0;    // z^d + c            (modes 1-5)
+const int FORMULA_PHOENIX = 1;  // z^d + c + p*z_prev (mode 6)
+const int FORMULA_TRICORN = 2;  // conj(z)^d + c      (mode 7)
+const int FORMULA_SHIP = 3;     // (|x| + i|y|)^d + c (mode 7)
+
 vec3 palette(float t) {
     return u_pal_a + u_pal_b * cos(TAU * (u_pal_c * t + u_pal_d + u_hue));
 }
@@ -58,32 +66,61 @@ vec2 cmul(vec2 a, vec2 b) {
     return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
+// z raised to u_power (2, 3, 5 or 8) by repeated squaring, so the degree
+// costs at most four multiplies however the modes set it.
+vec2 cpow_d(vec2 z) {
+    vec2 z2 = cmul(z, z);
+    if (u_power == 2) return z2;
+    if (u_power == 3) return cmul(z2, z);
+    if (u_power == 5) return cmul(cmul(z2, z2), z);
+    vec2 z4 = cmul(z2, z2);
+    return cmul(z4, z4);
+}
+
+// The escape loop, with the map it iterates pasted in: testing u_formula
+// inside the loop instead costs about a third of the frame rate on a small
+// GPU (measured: 64 -> 45 fps at 1024x576 on Intel UHD 600), so each family
+// gets its own copy of the loop with no test in it at all.
+//
+// SETTLED is the extra condition for calling a repeat of z a settled orbit.
+// It's just `true` for the maps whose whole state is z; the Phoenix map's
+// state is the pair (z, z_prev), so there a repeat of z on its own isn't a
+// cycle and would cut the run short and misread it as interior.
+#define ESCAPE_LOOP(STEP, SETTLED)                                             \
+    for (int i = 0; i < 1000; i++) {                                           \
+        if (i >= max_iter) break;                                              \
+        STEP;                                                                  \
+        float d2 = dot(z, z);                                                  \
+        trap = min(trap, d2);                                                  \
+        if (iter < 12) axis_trap = min(axis_trap, min(abs(z.x), abs(z.y)));    \
+        if (d2 > 256.0) break;                                                 \
+        iter++;                                                                \
+        /* Interior points settle into a cycle; once z revisits a saved     */ \
+        /* point, stop instead of burning the remaining iterations.         */ \
+        if ((iter & 7) == 0) {                                                 \
+            vec2 dz = z - saved;                                               \
+            if (dot(dz, dz) < 1e-7 && (SETTLED)) { iter = max_iter; break; }   \
+            if ((iter & 31) == 0) saved = z;                                   \
+        }                                                                      \
+    }
+
 vec3 julia(vec2 z, int max_iter) {
     float r0 = log(length(z) + 0.2);
     int iter = 0;
     float trap = 1e9;
     float axis_trap = 1e9;
     vec2 saved = z;
-    for (int i = 0; i < 1000; i++) {
-        if (i >= max_iter) break;
-        vec2 z2 = cmul(z, z);
-        if (u_power == 2) z = z2;
-        else if (u_power == 3) z = cmul(z2, z);
-        else if (u_power == 5) z = cmul(cmul(z2, z2), z);
-        else { vec2 z4 = cmul(z2, z2); z = cmul(z4, z4); }
-        z += u_c;
-        float d2 = dot(z, z);
-        trap = min(trap, d2);
-        if (iter < 12) axis_trap = min(axis_trap, min(abs(z.x), abs(z.y)));
-        if (d2 > 256.0) break;
-        iter++;
-        // Interior points settle into a cycle; once z revisits a saved
-        // point, stop instead of burning the remaining iterations.
-        if ((iter & 7) == 0) {
-            vec2 dz = z - saved;
-            if (dot(dz, dz) < 1e-7) { iter = max_iter; break; }
-            if ((iter & 31) == 0) saved = z;
-        }
+    // Only the Phoenix map keeps a previous z; the others never read it.
+    vec2 z_prev = vec2(0.0);
+    if (u_formula == FORMULA_POWER) {
+        ESCAPE_LOOP(z = cpow_d(z) + u_c, true)
+    } else if (u_formula == FORMULA_TRICORN) {
+        ESCAPE_LOOP(z = cpow_d(vec2(z.x, -z.y)) + u_c, true)
+    } else if (u_formula == FORMULA_SHIP) {
+        ESCAPE_LOOP(z = cpow_d(abs(z)) + u_c, true)
+    } else {
+        ESCAPE_LOOP(vec2 zn = cpow_d(z) + u_c + cmul(u_p, z_prev); z_prev = z; z = zn,
+                    dot(z - z_prev, z - z_prev) < 1e-7)
     }
 
     if (iter >= max_iter) {

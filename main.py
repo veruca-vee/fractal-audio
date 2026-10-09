@@ -1,8 +1,8 @@
 """
 Audio-reactive Julia set fractal, driven by Veruca's sequence math and phi.
 
-Three modes, each a different path for the Julia constant c (see
-phi_paths.py):
+Seven modes, each a different path for the Julia constant c — and, for the
+last two, a different map to iterate (see phi_paths.py):
     1  Sequence drift     - golden-angle spiral whose radius crossfades between
                             the halving / doubled / Fibonacci sequences; one
                             sequence term per musical "bar"
@@ -10,6 +10,20 @@ phi_paths.py):
                             the music's repeat length picks the flower
     3  Fibonacci powers   - z^3, z^5, z^8 + c (3/5/8-fold symmetry), cutting
                             between them on kicks; c makes one loop per repeat
+    4  Metallic spirals   - mode 1 off phi: the bronze, silver, golden and
+                            plastic means, each with its own divergence angle
+                            (33, 61.8, 137.5, 205.1 deg) and its own integer
+                            sequences, walked from the tightest angle outward
+    5  Farey tour         - mode 2 off the Fibonacci rails: c descends the
+                            Stern-Brocot tree, so the arm count is the mediant
+                            of the last two, and kicks pick the branch — the
+                            music writes a continued fraction
+    6  Phoenix wings      - z^2 + c + p*z_prev, one step of memory, which
+                            breaks the symmetry into wings; p swings between
+                            -1/phi and -1/phi^2
+    7  Mandelbar flames   - the antiholomorphic maps: tricorn (z-bar^d + c)
+                            and burning ship (|Re z| + i|Im z|)^d + c, d = 2
+                            or 3, cutting between the four on kicks
 
 Every layer of the music is measured (rhythm.py) and does one thing:
     loudness        how fast c moves (when there's no steady repeat to follow)
@@ -20,19 +34,20 @@ Every layer of the music is measured (rhythm.py) and does one thing:
     bass level      breathes the zoom
     vocals          fold the fractal into a ring of copies twisted into spirals
     pitch           the dominant note shifts the palette's hue
-    repeat length   the tempo of c's path: mode 1 steps a sequence term, mode 3
-                    makes a loop, per bar; mode 2 picks the matching flower
+    repeat length   the tempo of c's path: modes 1 and 4 step a sequence term,
+                    modes 3, 6 and 7 make a loop, mode 5 takes a branch, per
+                    bar; mode 2 picks the flower with the matching arm count
     section change  next palette
 
 A CSV of everything it heard goes to logs/, with a summary when you quit.
 
 Run:
-    python main.py [--mode 1|2|3] [--terms 60] [--angle 137.5]
+    python main.py [--mode 1..7] [--terms 60] [--angle 137.5]
                    [--device NAME|INDEX] [--scale 0.75] [--iters 128]
                    [--fps] [--no-log]
 
 Keys while running:
-    1 / 2 / 3   switch mode
+    1 ... 7     switch mode
     r           the Douady rabbit (a Julia set), on/off
     [ / ]       decrease / increase mode 1's spiral angle by 0.5 degrees
     space       pause/resume the path
@@ -84,17 +99,43 @@ FOLD_MAX = 6        # most copies the vocals can split the fractal into
 FOLD_HOLD = 0.3     # min seconds between fold-count changes, so it doesn't flicker
 FOLD_FADE = 0.3     # crossfade time for each change
 
-MODE_NAMES = {1: "Sequence drift", 2: "Fibonacci flowers", 3: "Fibonacci powers"}
+MODE_NAMES = {
+    1: "Sequence drift", 2: "Fibonacci flowers", 3: "Fibonacci powers",
+    4: "Metallic spirals", 5: "Farey tour", 6: "Phoenix wings",
+    7: "Mandelbar flames",
+}
 POWER_LABELS = {3: "z³ + c", 5: "z⁵ + c", 8: "z⁸ + c"}
 POWER_MIN_SECONDS = 12.0  # mode 3 switches power on the first kick after this...
 POWER_MAX_SECONDS = 24.0  # ...or after this, kick or not
 BLEND_SECONDS = 40.0      # mode 1: time to cycle through all three sequences
+
+FAMILY_SECONDS = 100.0    # mode 4: time to walk the metallic families end to end
+FAREY_Q_MAX = 89          # mode 5: restart once the arms are finer than this
+# Mode 7 cuts between its four maps the way mode 3 cuts between powers.
+MANDELBAR_MIN_SECONDS = 14.0
+MANDELBAR_MAX_SECONDS = 28.0
+FORMULA_NAMES = {
+    phi_paths.FORMULA_POWER: "power",
+    phi_paths.FORMULA_PHOENIX: "phoenix",
+    phi_paths.FORMULA_TRICORN: "tricorn",
+    phi_paths.FORMULA_SHIP: "ship",
+}
+MANDELBAR_LABELS = {
+    (phi_paths.FORMULA_TRICORN, 2): "tricorn  z̄² + c",
+    (phi_paths.FORMULA_TRICORN, 3): "tricorn  z̄³ + c",
+    (phi_paths.FORMULA_SHIP, 2): "burning ship, d = 2",
+    (phi_paths.FORMULA_SHIP, 3): "burning ship, d = 3",
+}
 
 # The music's repeat length sets the pace of c's path. A repeat shorter than
 # the minimum loop time is stretched to a whole number of repeats ("a bar").
 CLOCK_MIN_CONF = 0.35
 MODE1_MIN_LOOP_S = 6.0    # one sequence term per bar
 MODE3_MIN_LOOP_S = 8.0    # one loop around the main component per bar
+MODE4_MIN_LOOP_S = 5.0    # one metallic-spiral term per bar
+MODE5_MIN_STEP_S = 3.0    # one Stern-Brocot branch per bar
+MODE6_MIN_LOOP_S = 8.0    # one loop of the Phoenix map's c per bar
+MODE7_MIN_LOOP_S = 7.0    # one orbit of the mandelbar body per bar
 FLOWER_GLIDE = 0.35       # flowers per second toward the one the music picks
 PLL_GAIN = 1.5            # how hard c's phase is pulled onto the music's
 
@@ -204,7 +245,7 @@ class AudioAnalyzer:
 LOG_COLUMNS = [
     "t", "mode", "fps", "pulse_s", "cycle_pulses", "cycle_s", "cycle_conf", "cycle_phase",
     "note", "sections", "kick_per_s", "snare_per_s", "hat_per_s", "bass_note_per_s",
-    "amp", "bass", "mid", "treble", "vocal", "folds", "power", "flower_arms", "palette",
+    "amp", "bass", "mid", "treble", "vocal", "folds", "power", "formula", "arms", "palette",
 ]
 
 
@@ -296,7 +337,8 @@ class FractalWindow(mglw.WindowConfig):
         self.mode = self.args.mode
         self.angle = self.args.angle
         self.radii = phi_paths.sequence_radii(self.args.terms, radius_scale=1.1)
-        self.path_s = {1: 0.0, 2: 0.0, 3: 0.0}  # each mode resumes where it left off
+        # Each mode resumes where it left off.
+        self.path_s = {m: 0.0 for m in MODE_NAMES}
         self.blend_phase = 0.0
         self.paused = False
         self.rabbit = False
@@ -305,6 +347,26 @@ class FractalWindow(mglw.WindowConfig):
         self.flower_mirror = False
         self.power_idx = 1  # into phi_paths.FIB_POWERS; starts at z^5
         self.power_time = 0.0
+
+        # Mode 4: the metallic families, and the phase c's angle accumulates
+        # into (see phi_paths.metallic_sample for why it's accumulated).
+        self.metallic = phi_paths.metallic_profiles(self.args.terms, radius_scale=1.1)
+        self.metal_theta = 0.0
+        self.family_pos = 0.0
+        self.family_dir = 1
+        self.metal_label = self.metallic[0][0]
+
+        # Mode 5: the Stern-Brocot descent, the glide between its last two
+        # mediants, and the kick count that picks the next branch.
+        self.farey = phi_paths.FareyWalk(q_max=FAREY_Q_MAX)
+        self.farey_f = 0.0
+        self.farey_kicks = 0
+
+        # Modes 6 and 7: which map the shader iterates, and its parameter.
+        self.formula = phi_paths.FORMULA_POWER
+        self.p_param = 0j
+        self.mandel_idx = 0
+        self.mandel_time = 0.0
         self.spin = 0.0
         self.spin_paused = False
         self.zoom_phase = 0.0
@@ -433,6 +495,8 @@ class FractalWindow(mglw.WindowConfig):
         """Advance the current mode's path; return (c, power, center, zoom)."""
         loud = amp * amp
         self.power = 2
+        self.formula = phi_paths.FORMULA_POWER
+        self.p_param = 0j
         if self.rabbit:
             # The rabbit sits in a small bulb, so a kick only shivers c.
             return RABBIT_C + 0.004 * self.kick * cmath.rect(1.0, 3 * self.spin), 2, 0j, 1.1
@@ -465,6 +529,68 @@ class FractalWindow(mglw.WindowConfig):
             c, fixed_point = phi_paths.fibonacci_flower(
                 self.flower_pos, 0.6 * amp + 1.4 * self.kick, self.flower_mirror)
             return c, 2, fixed_point, 0.7
+
+        if self.mode == 4:
+            # Same step as mode 1 — one sequence term per bar — but the angle
+            # is the current metallic family's, accumulated into a phase so
+            # sliding between families doesn't whip c around the plane.
+            before = self.path_s[4]
+            self._advance(4, 1.0, self._music_clock(MODE4_MIN_LOOP_S), 0.05 + 0.5 * loud, dt)
+            last = len(self.metallic) - 1
+            if not self.paused:
+                self.family_pos += self.family_dir * len(self.metallic) * dt / FAMILY_SECONDS
+                if not 0.0 <= self.family_pos <= last:
+                    self.family_dir = -self.family_dir
+                    self.family_pos = min(max(self.family_pos, 0.0), float(last))
+            r, angle, label = phi_paths.metallic_sample(
+                self.metallic, self.path_s[4], self.family_pos, 0.3 * amp + 0.9 * self.kick)
+            self.metal_theta += math.radians(angle) * (self.path_s[4] - before)
+            if label != self.metal_label:
+                self.metal_label = label
+                self.show_toast(f"4  {label}")
+            return cmath.rect(r, self.metal_theta), 2, 0j, 1.1
+
+        if self.mode == 5:
+            # One branch of the Stern-Brocot tree per bar, and the music picks
+            # it: an odd number of kicks in the bar goes right, an even number
+            # (none included) goes left. Parity rather than "any kick at all"
+            # because a rule that saturates one way just adds an arm per step;
+            # it's the branch changing that makes the arm counts interesting.
+            clock = self._music_clock(MODE5_MIN_STEP_S)
+            if not self.paused:
+                self.farey_kicks += kick_hit
+                self.farey_f += (clock[0] if clock else 0.12 + 0.4 * loud) * dt
+                while self.farey_f >= 1.0:
+                    self.farey_f -= 1.0
+                    self.farey.step(self.farey_kicks % 2 == 1)
+                    self.farey_kicks = 0
+            self.flower_arms = self.farey.arms
+            c, fixed_point = self.farey.c(self.farey_f, 0.5 * amp + 1.3 * self.kick)
+            return c, 2, fixed_point, 0.7
+
+        if self.mode == 6:
+            self._advance(6, 2 * math.pi, self._music_clock(MODE6_MIN_LOOP_S),
+                          (0.08 + 0.5 * loud) / (2 * math.pi), dt)
+            c, self.p_param = phi_paths.phoenix_path(
+                self.path_s[6], 0.7 * amp + 1.3 * self.kick)
+            self.formula = phi_paths.FORMULA_PHOENIX
+            return c, 2, 0j, 1.0
+
+        if self.mode == 7:
+            self._advance(7, 2 * math.pi, self._music_clock(MODE7_MIN_LOOP_S),
+                          (0.1 + 0.6 * loud) / (2 * math.pi), dt)
+            self.mandel_time += dt
+            if ((kick_hit and self.mandel_time > MANDELBAR_MIN_SECONDS)
+                    or self.mandel_time > MANDELBAR_MAX_SECONDS):
+                self.mandel_idx = (self.mandel_idx + 1) % len(phi_paths.MANDELBAR_VARIANTS)
+                self.mandel_time = 0.0
+                variant = phi_paths.MANDELBAR_VARIANTS[self.mandel_idx]
+                self.show_toast(f"7  {MANDELBAR_LABELS[variant[0], variant[1]]}")
+            variant = phi_paths.MANDELBAR_VARIANTS[self.mandel_idx]
+            self.formula = variant[0]
+            self.power = variant[1]
+            c = phi_paths.mandelbar_path(self.path_s[7], 0.6 * amp + 1.1 * self.kick, variant)
+            return c, variant[1], 0j, 1.0
 
         self._advance(3, 2 * math.pi, self._music_clock(MODE3_MIN_LOOP_S), (0.1 + 0.6 * loud) / (2 * math.pi), dt)
         self.power_time += dt
@@ -522,7 +648,10 @@ class FractalWindow(mglw.WindowConfig):
             "amp": f"{tr.amp:.2f}", "bass": f"{tr.bass:.2f}", "mid": f"{tr.mid:.2f}",
             "treble": f"{tr.treble:.2f}", "vocal": f"{tr.vocal:.2f}",
             "folds": self.fold_to, "power": self.power,
-            "flower_arms": self.flower_arms if self.mode == 2 and not self.rabbit else "",
+            "formula": FORMULA_NAMES[self.formula],
+            # Arm count at the bulb c is sitting in, for the two modes that
+            # ride the main cardioid.
+            "arms": self.flower_arms if self.mode in (2, 5) and not self.rabbit else "",
             "palette": PALETTES[self.pal_idx][0],
         }, mode)
         self.log_frames = 0
@@ -550,7 +679,9 @@ class FractalWindow(mglw.WindowConfig):
         keys = self.wnd.keys
         if action != keys.ACTION_PRESS:
             return
-        mode_keys = {keys.NUMBER_1: 1, keys.NUMBER_2: 2, keys.NUMBER_3: 3}
+        mode_keys = {keys.NUMBER_1: 1, keys.NUMBER_2: 2, keys.NUMBER_3: 3,
+                     keys.NUMBER_4: 4, keys.NUMBER_5: 5, keys.NUMBER_6: 6,
+                     keys.NUMBER_7: 7}
         if key in mode_keys:
             self.mode = mode_keys[key]
             self.rabbit = False
@@ -617,6 +748,8 @@ class FractalWindow(mglw.WindowConfig):
             "u_resolution": self.scene_tex.size,
             "u_c": (c.real, c.imag),
             "u_power": power,
+            "u_formula": self.formula,
+            "u_p": (self.p_param.real, self.p_param.imag),
             "u_center": (center.real, center.imag),
             "u_zoom": zoom,
             "u_amp": amp,
