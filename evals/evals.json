@@ -1,0 +1,14 @@
+{
+  "skill_name": "tdd",
+  "evals": [
+    {"id": 1, "name": "feature-hats-brighten-edge-light",
+     "prompt": "the hi-hats should flick the edge light a bit brighter when they hit, right now only the fractal reacts to them",
+     "expected_output": "A failing test written and run first, then the implementation.", "files": []},
+    {"id": 2, "name": "bugfix-vocal-pitch-octave-jump",
+     "prompt": "vocal_pitch sometimes jumps an octave in the middle of a held note, can you sort that",
+     "expected_output": "A failing test reproducing the octave jump before any fix.", "files": []},
+    {"id": 3, "name": "feature-petal-count-key",
+     "prompt": "add a key that cycles the vocal shape's petal count by hand so I can audition them",
+     "expected_output": "A failing test for the key behaviour first, then the binding.", "files": []}
+  ]
+}

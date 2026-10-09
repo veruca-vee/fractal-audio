@@ -219,6 +219,7 @@ Keys while it's running:
 | `p` | next color palette (Prism, Ember, Ocean, Vapor, Acid, Ice) |
 | `a` | toggle automatic palette changes (on by default: on each section change, or after 60 s) |
 | `c` | pause/resume the spin |
+| `k` | step the vocal shape's petal count by hand (2, 3, 4, 5, 6, 8, 12, then back to following the mode), for auditioning them |
 | `f11` | toggle fullscreen |
 | `esc` | quit |
 

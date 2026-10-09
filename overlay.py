@@ -42,6 +42,7 @@ EDGE_HEAD = 0.70          # brightness of the moving head
 EDGE_HEAD_PX = 80.0     # how long the head's tail is, in pixels of perimeter
 EDGE_CORE_PX = 11.0      # the head's own size, so it's visible at 0:00 too
 EDGE_PAUSED = 0.45       # the light dims to this while paused
+EDGE_HAT = 0.5           # a hi-hat hit flicks the light this much brighter
 
 # A plain textured quad, used for every image this module and the toasts draw.
 QUAD_VERT = """#version 330
@@ -85,6 +86,7 @@ uniform vec2 u_resolution;
 uniform float u_progress;   // 0..1 through the track
 uniform float u_alpha;      // overall strength; 0 draws nothing
 uniform vec3 u_tint;
+uniform float u_hat;       // 1 on a hi-hat hit, decaying to 0
 out vec4 fragColor;
 
 const float WIDTH = """ + f"{EDGE_WIDTH_PX}" + """;
@@ -93,6 +95,7 @@ const float BASE = """ + f"{EDGE_BASE}" + """;
 const float HEAD = """ + f"{EDGE_HEAD}" + """;
 const float HEAD_PX = """ + f"{EDGE_HEAD_PX}" + """;
 const float CORE_PX = """ + f"{EDGE_CORE_PX}" + """;
+const float HAT = """ + f"{EDGE_HAT}" + """;
 
 void main() {
     vec2 p = gl_FragCoord.xy;
@@ -127,6 +130,7 @@ void main() {
     }
     float falloff = exp(-dist / WIDTH);
 
+    lit *= 1.0 + HAT * u_hat;
     fragColor = vec4(u_tint * lit * falloff * u_alpha, 1.0);
 }
 """
@@ -291,7 +295,7 @@ class NowPlayingOverlay:
         x0, y0, x1, y1 = rect
         return (2 * x0 / w - 1, 1 - 2 * y1 / h, 2 * x1 / w - 1, 1 - 2 * y0 / h)
 
-    def draw(self, player, now, size, buffer_size):
+    def draw(self, player, now, size, buffer_size, hat=0.0):
         """Draw the edge light, and the controls if they're up.
 
         Expects to be called with the window bound and the scene already in
@@ -308,6 +312,7 @@ class NowPlayingOverlay:
             self.edge_prog["u_progress"].value = min(1.0, max(0.0, position / duration))
             self.edge_prog["u_alpha"].value = EDGE_PAUSED if player.paused else 1.0
             self.edge_prog["u_tint"].value = self.tint
+            self.edge_prog["u_hat"].value = max(0.0, min(1.0, hat))
             self.edge_vao.render(moderngl.TRIANGLE_STRIP)
             self.ctx.blend_func = moderngl.DEFAULT_BLENDING
             self.ctx.disable(moderngl.BLEND)

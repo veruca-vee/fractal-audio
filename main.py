@@ -62,6 +62,9 @@ Keys while running:
     p           next color palette
     a           toggle automatic palette changes (on section changes)
     c           pause/resume the spin
+    k           step the vocal shape's petal count by hand, for
+                auditioning them; past the last one it goes back to
+                following the mode
     esc         quit
 
   with --play:
@@ -114,7 +117,20 @@ PALETTE_AUTO_SECONDS = 60.0  # fallback change time if no section change comes
 PALETTE_FADE_AUTO = 4.0
 PALETTE_FADE_KEY = 0.8
 
-FOLD_MAX = 6        # most copies the vocals can split the fractal into
+# The voice's own shape (julia.frag's orbit trap). Vocals used to drive the
+# fold count, which is the one real mismatch in the mapping: a fold count is
+# a discrete global symmetry and a voice is a continuous melodic line, so
+# singing read as "the screen occasionally reconfigures". The shape is
+# continuous and it moves, which is what a line deserves; the fold goes to
+# the arrangement's density, where a discrete count belongs.
+VOICE_IN = 0.30           # vocal level where the shape starts to appear...
+VOICE_FULL = 0.75         # ...and where it is fully out
+VOICE_EASE = 2.5          # per second, how fast it comes and goes
+VOICE_PETALS_EASE = 0.6   # per second, how fast the petal count morphs
+# The counts `k` steps through when auditioning the vocal shape by hand.
+PETAL_CHOICES = (2, 3, 4, 5, 6, 8, 12)
+
+FOLD_MAX = 6        # most copies the arrangement can split the fractal into
 FOLD_HOLD = 0.3     # min seconds between fold-count changes, so it doesn't flicker
 FOLD_FADE = 0.3     # crossfade time for each change
 
@@ -446,7 +462,10 @@ class FractalWindow(mglw.WindowConfig):
         self.scene_tex = None
         self.scene_fbo = None
 
-        self.vocal_slow = 0.0
+        self.density_slow = 0.0
+        self.voice_out = 0.0      # how far the voice's shape has emerged
+        self.voice_petals = 5.0
+        self.petals_held = None   # a count held by hand with `k`; None = auto
         self.fold_from = 1
         self.fold_to = 1
         self.fold_mix = 1.0
@@ -709,11 +728,13 @@ class FractalWindow(mglw.WindowConfig):
         self.pal_fade = fade
         self.pal_next_auto = self.now + PALETTE_AUTO_SECONDS
 
-    def _update_fold(self, dt, vocal):
-        # Vocals set the fold count; each change crossfades from the old one.
-        # Below ~0.45 (voice not standing out) it stays whole.
-        self.vocal_slow += (vocal - self.vocal_slow) * min(dt * 3.0, 1.0)
-        target = 1 + int(round(self.vocal_split() * (FOLD_MAX - 1)))
+    def _update_fold(self, dt, density):
+        """How full the arrangement is sets the fold count; each change
+        crossfades from the old one. A sparse verse stays whole and a dense
+        chorus splits into up to six copies, which is a discrete count
+        following a slow-moving structural quantity rather than a melody."""
+        self.density_slow += (density - self.density_slow) * min(dt * 3.0, 1.0)
+        target = 1 + int(round(self.fold_amount() * (FOLD_MAX - 1)))
         if self.fold_mix < 1.0:
             self.fold_mix = min(1.0, self.fold_mix + dt / FOLD_FADE)
         elif target != self.fold_to and self.now - self.fold_changed_at > FOLD_HOLD:
@@ -722,8 +743,48 @@ class FractalWindow(mglw.WindowConfig):
             self.fold_mix = 0.0
             self.fold_changed_at = self.now
 
-    def vocal_split(self):
-        return min(max((self.vocal_slow - 0.45) / 0.4, 0.0), 1.0)
+    def fold_amount(self):
+        """0 for a bass-and-drums verse, 1 for a full arrangement."""
+        return min(max((self.density_slow - 0.35) / 0.35, 0.0), 1.0)
+
+    def _cycle_petals(self):
+        """Step the vocal shape's petal count on by hand, for auditioning.
+
+        The counts go round in order and then the cycle comes back to
+        automatic, so a listen through them ends where it started rather
+        than leaving the shape pinned. The eased morph still applies, so
+        each count arrives the way the music's own changes do.
+        """
+        if self.petals_held is None:
+            self.petals_held = PETAL_CHOICES[0]
+        else:
+            i = PETAL_CHOICES.index(self.petals_held) + 1
+            self.petals_held = PETAL_CHOICES[i] if i < len(PETAL_CHOICES) else None
+
+    def _update_voice(self, dt):
+        """Bring the voice's shape out, and settle its petal count.
+
+        The petal count follows whatever symmetry the current mode is built
+        on, so the shape belongs to the picture it is sitting in rather than
+        arriving from nowhere: the arm count in the two cardioid modes, the
+        exponent in the power modes, five otherwise. It is a float and eased,
+        so a change morphs instead of snapping.
+
+        Unless `k` is holding a count, in which case that one wins until the
+        cycle comes back round to automatic.
+        """
+        target = smoothstep((self.tr.vocal - VOICE_IN) / (VOICE_FULL - VOICE_IN))
+        self.voice_out += (target - self.voice_out) * min(dt * VOICE_EASE, 1.0)
+
+        if self.petals_held is not None:
+            petals = self.petals_held
+        elif self.mode in (2, 5) and self.flower_arms:
+            petals = min(self.flower_arms, 12)
+        elif self.mode in (3, 7):
+            petals = self.power
+        else:
+            petals = 5
+        self.voice_petals += (petals - self.voice_petals) * min(dt * VOICE_PETALS_EASE, 1.0)
 
     def _write_log(self):
         tr = self.tr
@@ -800,6 +861,10 @@ class FractalWindow(mglw.WindowConfig):
             self.pal_auto = not self.pal_auto
             self.pal_next_auto = self.now + PALETTE_AUTO_SECONDS
             self.show_toast(f"Auto palettes  {'on' if self.pal_auto else 'off'}")
+        elif key == keys.K:
+            self._cycle_petals()
+            self.show_toast(f"Voice petals  {self.petals_held}"
+                            if self.petals_held else "Voice petals  auto")
         elif key == keys.C:
             self.spin_paused = not self.spin_paused
             self.show_toast(f"Spin  {'paused' if self.spin_paused else 'on'}")
@@ -866,7 +931,8 @@ class FractalWindow(mglw.WindowConfig):
 
         if not self.spin_paused:
             self.spin += (0.03 + 0.1 * amp + 0.6 * self.kick) * frame_time
-        self._update_fold(frame_time, tr.vocal)
+        self._update_fold(frame_time, tr.density)
+        self._update_voice(frame_time)
         new_track = self._poll_player()
         # A new track is a bigger change than a section within one, so it
         # moves the palette on for the same reason a section change does.
@@ -902,7 +968,15 @@ class FractalWindow(mglw.WindowConfig):
             "u_fold_a": float(self.fold_from),
             "u_fold_b": float(self.fold_to),
             "u_fold_mix": self.fold_mix,
-            "u_twist": self.vocal_split() * 1.2 + 0.5 * self.bass_pulse,
+            "u_twist": self.fold_amount() * 1.2 + 0.5 * self.bass_pulse,
+            # The voice: how far out, how many petals, and where the contour
+            # has turned and sized it. Weight 0 leaves the fractal untouched.
+            "u_trap_weight": 0.85 * self.voice_out,
+            "u_trap_k": self.voice_petals,
+            "u_trap_rot": math.pi * (0.6 * tr.vocal_pitch + 0.05 * time),
+            "u_trap_radius": 0.28 + 0.5 * tr.vocal_pitch,
+            "u_trap_sharp": 14.0 + 16.0 * tr.density,
+            "u_trap_hue": 0.5 + 0.3 * tr.vocal_pitch,
             "u_pal_a": tuple(pal_a),
             "u_pal_b": tuple(pal_b),
             "u_pal_c": tuple(pal_c),
@@ -916,8 +990,7 @@ class FractalWindow(mglw.WindowConfig):
         self.ctx.clear(0.0, 0.0, 0.0)
         self._draw_quad(self.scene_tex, (-1.0, -1.0, 1.0, 1.0), 1.0)
 
-        if self.overlay is not None:
-            self.overlay.draw(self.player, time, self.wnd.size, self.wnd.buffer_size)
+        self._draw_overlay(time)
 
         remaining = self.toast_until - time
         if self.toast_tex is not None and remaining > 0:
@@ -930,6 +1003,18 @@ class FractalWindow(mglw.WindowConfig):
             self._draw_quad(self.toast_tex, (x0, y0, x0 + 2 * tw / bw, y0 + 2 * th / bh),
                             min(1.0, remaining / TOAST_FADE))
             self.ctx.disable(moderngl.BLEND)
+
+    def _draw_overlay(self, time):
+        """The now-playing edge light, over the frame just drawn.
+
+        The hat strength goes with it: the hats are the fastest layer the
+        tracker hears, so they are what the border can flick on without the
+        progress light reading as a flicker.
+        """
+        if self.overlay is None:
+            return
+        self.overlay.draw(self.player, time, self.wnd.size, self.wnd.buffer_size,
+                          hat=self.hat)
 
     def on_close(self):
         self.audio.stop()

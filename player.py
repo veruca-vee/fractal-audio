@@ -95,6 +95,7 @@ class MpvPlayer:
         self._lock = threading.Lock()
         self._req = 0
         self._pending_seek = None
+        self._pending_index = None
         self._sock = None
         self._proc = None
         self._buf = b""
@@ -250,6 +251,15 @@ class MpvPlayer:
             self.state[msg.get("name")] = msg.get("data")
         elif event == "file-loaded":
             self.track_serial += 1
+            if self._pending_index is not None:
+                i, self._pending_index = self._pending_index, None
+                if self.state.get("playlist-pos") != i:
+                    # mpv started entry 0 by itself; move off it now that
+                    # there is a playlist to move within. Any pending seek
+                    # belongs to the track being moved to, so it waits for
+                    # the file-loaded that this brings about.
+                    self._send_play(i)
+                    return
             if self._pending_seek is not None:
                 pos, self._pending_seek = self._pending_seek, None
                 self.send("seek", pos, "absolute")
@@ -308,9 +318,37 @@ class MpvPlayer:
         self.send("cycle", "pause")
 
     def play_index(self, i, seek=None):
+        """Play track `i`, optionally from `seek` seconds in.
+
+        Safe to call the moment the player is built. `loadlist` is
+        asynchronous, so until mpv reports a playlist this request would be
+        dropped and the first entry played instead -- so it is held and sent
+        when the playlist lands, the same way a seek waits for the file.
+
+        Waiting for the playlist to appear is not enough, which is what
+        the second attempt at this did: mpv starts entry 0 of a freshly
+        loaded playlist in the same tick as it reports the playlist, so the
+        request is issued and then immediately overridden. The switch has to
+        wait for that first file to load and then move off it -- which costs
+        nothing audible, since the player is built paused.
+
+        Whether the original race was lost came down to how warm the machine
+        was: the first player built in a process got the right track, and
+        the second, with mpv's pages already cached, started quickly enough
+        to lose. wait_ready() exists for callers that want to block, but a
+        guarantee that only holds when the caller remembers to ask for it is
+        not one, which is how this came back after being "fixed" once.
+        """
         if not 0 <= i < len(self.tracks):
             return
         self._pending_seek = seek
+        if not self.state.get("playlist-count"):
+            self._pending_index = i
+            return
+        self._send_play(i)
+
+
+    def _send_play(self, i):
         self.send("playlist-play-index", i)
         self.send("set_property", "pause", False)
 
