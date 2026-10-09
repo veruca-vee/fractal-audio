@@ -39,12 +39,19 @@ Every layer of the music is measured (rhythm.py) and does one thing:
                     bar; mode 2 picks the flower with the matching arm count
     section change  next palette
 
+With --play it also runs the music: mpv plays the files or folders you name
+(player.py) and the visuals listen to the monitor of system output, so the
+same capture path hears it. Knowing the player means the log says *where in
+which track* something was heard, and a new track moves the palette on.
+
 A CSV of everything it heard goes to logs/, with a summary when you quit.
 
 Run:
     python main.py [--mode 1..7] [--terms 60] [--angle 137.5]
                    [--device NAME|INDEX] [--scale 0.75] [--iters 128]
                    [--fps] [--no-log]
+                   [--play PATH... [--shuffle] [--seed N] [--volume 85]
+                                   [--no-resume]]
 
 Keys while running:
     1 ... 7     switch mode
@@ -56,6 +63,13 @@ Keys while running:
     a           toggle automatic palette changes (on section changes)
     c           pause/resume the spin
     esc         quit
+
+  with --play:
+    m           play/pause the music (space pauses the path, not the sound)
+    n / b       next / previous track
+    left/right  seek 10 s back / forward
+    up / down   volume
+    i           show what's playing, and how far in
 """
 
 import cmath
@@ -74,6 +88,7 @@ import moderngl_window as mglw
 import sounddevice as sd
 
 import phi_paths
+import player
 import pw_monitor
 from rhythm import FIBONACCI, MusicTracker, wrap_half
 from sequences import GOLDEN_ANGLE_DEG
@@ -154,6 +169,12 @@ ZOOM_OUT_MAX = 1.8
 ZOOM_CYCLE_SECONDS = 24.0
 
 LOG_EVERY_S = 0.5
+
+# --play only: mpv plays, and the visuals hear it the same way they hear
+# anything else, through the monitor of the default sink (see player.py).
+PLAYER_STATE_FILE = HERE / ".player_state.json"
+SEEK_STEP = 10.0          # seconds per left/right press
+VOLUME_STEP = 5.0         # percent per up/down press
 
 TOAST_SECONDS = 1.5
 TOAST_FADE = 0.4
@@ -246,6 +267,7 @@ LOG_COLUMNS = [
     "t", "mode", "fps", "pulse_s", "cycle_pulses", "cycle_s", "cycle_conf", "cycle_phase",
     "note", "sections", "kick_per_s", "snare_per_s", "hat_per_s", "bass_note_per_s",
     "amp", "bass", "mid", "treble", "vocal", "folds", "power", "formula", "arms", "palette",
+    "track", "track_s",
 ]
 
 
@@ -265,6 +287,7 @@ class SessionLog:
         self.notes = Counter()
         self.rate_sums = np.zeros(4)      # kick, snare, hat, bass-note per second
         self.last_sections = 0
+        self.tracks = Counter()           # track title -> rows, when --play is on
 
     def add(self, row, mode):
         self.writer.writerow([row[c] for c in LOG_COLUMNS])
@@ -273,6 +296,8 @@ class SessionLog:
         self.seconds[mode] = self.seconds.get(mode, 0.0) + LOG_EVERY_S
         self.rate_sums += [row["kick_per_s"], row["snare_per_s"], row["hat_per_s"], row["bass_note_per_s"]]
         self.notes[row["note"]] += 1
+        if row["track"]:
+            self.tracks[row["track"]] += 1
         if row["cycle_pulses"] and row["cycle_conf"] >= CLOCK_MIN_CONF:
             self.cycles[row["cycle_pulses"]] += 1
         self.last_sections = row["sections"]
@@ -290,6 +315,10 @@ class SessionLog:
         lines.append(f"section changes: {self.last_sections}")
         lines.append("most heard notes: " + ", ".join(
             f"{n} {100 * c / self.rows:.0f}%" for n, c in self.notes.most_common(4)))
+        if self.tracks:
+            lines.append(f"{len(self.tracks)} tracks, longest on screen:")
+            for name, c in self.tracks.most_common(5):
+                lines.append(f"  {c * LOG_EVERY_S:5.0f} s  {name}")
         total = sum(self.cycles.values())
         if total:
             lines.append(f"repeat lengths (pulses) while the tracker was confident, {total * LOG_EVERY_S:.0f} s:")
@@ -324,6 +353,11 @@ class FractalWindow(mglw.WindowConfig):
         parser.add_argument("--iters", type=int, default=128, help="max Julia iterations; lower is faster, higher is more detail")
         parser.add_argument("--fps", action="store_true", help="print frames per second to stderr every 5 seconds")
         parser.add_argument("--no-log", action="store_true", help="don't write a session log to logs/")
+        parser.add_argument("--play", type=str, nargs="+", metavar="PATH", help="play these files/folders with mpv, and listen to the monitor of system output unless --device says otherwise")
+        parser.add_argument("--shuffle", action="store_true", help="--play: shuffle the playlist")
+        parser.add_argument("--seed", type=int, default=None, help="--play: seed for --shuffle, so a shuffle can be repeated")
+        parser.add_argument("--volume", type=float, default=85.0, help="--play: mpv volume, 0-130")
+        parser.add_argument("--no-resume", action="store_true", help="--play: start at the top instead of where the last session stopped")
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -384,9 +418,21 @@ class FractalWindow(mglw.WindowConfig):
         self.vbo = self.ctx.buffer(quad.tobytes())
         self.vao = self.ctx.simple_vertex_array(self.prog, self.vbo, "in_position")
 
-        self.audio = AudioAnalyzer(device=resolve_device(self.args.device))
+        # With --play, what mpv plays comes back in through the monitor of
+        # the default sink, so that's the capture to default to.
+        device = self.args.device
+        if device is None and self.args.play:
+            device = "monitor"
+            print("--play: capturing the monitor of system output", file=sys.stderr)
+        self.audio = AudioAnalyzer(device=resolve_device(device))
         self.tr = self.audio.tracker
         self.audio.start()
+
+        self.player = None
+        self.player_state = None
+        self.track_seen = -1
+        if self.args.play:
+            self._start_player()
 
         # The layers' decaying hit strengths, and the counters they watch.
         self.kick = self.snare = self.hat = self.bass_pulse = 0.0
@@ -430,6 +476,47 @@ class FractalWindow(mglw.WindowConfig):
         self.pal_fade = 1.0
         self.pal_auto = True
         self.pal_next_auto = PALETTE_AUTO_SECONDS
+
+    def _start_player(self):
+        """Build the playlist, start mpv, and pick up where we left off.
+
+        A player that won't start is reported and then dropped: the visuals
+        work on whatever else is making sound, so there's no reason to take
+        the session down with it.
+        """
+        tracks = player.build_playlist(self.args.play, self.args.shuffle, self.args.seed)
+        if not tracks:
+            print(f"--play: no audio files under {', '.join(self.args.play)}", file=sys.stderr)
+            return
+        self.player_state = player.PlayerState(PLAYER_STATE_FILE)
+        volume = self.args.volume
+        if self.args.volume == 85.0:  # not given explicitly; use the saved one
+            volume = float(self.player_state.data.get("volume", volume))
+
+        # Starts paused so that resuming can seek before a note is played,
+        # rather than the first track blipping out before we move off it.
+        p = player.MpvPlayer(tracks, volume=volume, start_paused=True)
+        if p.failed:
+            print(f"--play: {p.failed}", file=sys.stderr)
+            return
+        self.player = p
+
+        # loadlist is asynchronous; without this the play_index below can
+        # land before the playlist exists and be dropped.
+        if not p.wait_ready():
+            print("--play: mpv never loaded the playlist", file=sys.stderr)
+
+        start_at, seek = 0, None
+        last = self.player_state.last if not self.args.no_resume else None
+        if last:
+            path, pos = last
+            try:
+                start_at = tracks.index(path)
+                seek = pos if pos > 5.0 else None  # near the top: just restart it
+            except ValueError:
+                pass  # that track isn't in this playlist any more
+        p.play_index(start_at, seek=seek)
+        print(f"--play: {len(tracks)} tracks, starting at {start_at + 1}", file=sys.stderr)
 
     def show_toast(self, text):
         """Render `text` into a small rounded pill and show it briefly."""
@@ -604,6 +691,22 @@ class FractalWindow(mglw.WindowConfig):
         c = phi_paths.fibonacci_power(self.path_s[3], 0.8 * amp + 1.2 * self.kick, power)
         return c, power, 0j, 1.0
 
+    def _poll_player(self):
+        """Announce a track when it changes. Returns True on the frame it
+        does, so the render loop can treat it as the scene change it is."""
+        if self.player is None or self.player.track_serial == self.track_seen:
+            return False
+        self.track_seen = self.player.track_serial
+        if self.track_seen:  # not the first load, which nobody has seen yet
+            self.show_toast(self.player.title())
+        return True
+
+    def _now_playing(self):
+        """(title, position in seconds) for the log, or ("", "")."""
+        if self.player is None or not self.player.alive:
+            return "", ""
+        return self.player.title(), f"{self.player.position:.1f}"
+
     def _current_palette(self):
         k = smoothstep((self.now - self.pal_t0) / self.pal_fade)
         return [(1 - k) * a + k * b for a, b in zip(self.pal_from, self.pal_to)]
@@ -653,6 +756,8 @@ class FractalWindow(mglw.WindowConfig):
             # ride the main cardioid.
             "arms": self.flower_arms if self.mode in (2, 5) and not self.rabbit else "",
             "palette": PALETTES[self.pal_idx][0],
+            # So a row says not just what was heard but where in which track.
+            **dict(zip(("track", "track_s"), self._now_playing())),
         }, mode)
         self.log_frames = 0
 
@@ -710,6 +815,32 @@ class FractalWindow(mglw.WindowConfig):
             self.show_toast(f"Spin  {'paused' if self.spin_paused else 'on'}")
         elif key == keys.ESCAPE:
             self.wnd.close()
+        elif self.player is not None:
+            self._transport_key(key, keys)
+
+    def _transport_key(self, key, keys):
+        """The player's keys, which only exist when --play gave it one.
+
+        Play/pause is `m`, not space: space already pauses the path, and a
+        session where the music stops but the fractal keeps moving (or the
+        reverse) is worth being able to ask for.
+        """
+        p = self.player
+        if key == keys.M:
+            p.toggle_pause()
+            # The cached flag is the pre-press one; `cycle` makes it the other.
+            self.show_toast("Play" if p.paused else "Pause")
+        elif key in (keys.N, keys.B):
+            p.next_track() if key == keys.N else p.prev_track()
+        elif key in (keys.LEFT, keys.RIGHT):
+            p.seek(SEEK_STEP if key == keys.RIGHT else -SEEK_STEP)
+        elif key in (keys.UP, keys.DOWN):
+            p.add_volume(VOLUME_STEP if key == keys.UP else -VOLUME_STEP)
+            self.show_toast(f"Volume  {p.state.get('volume', 0):.0f}%")
+        elif key == keys.I:
+            pos, dur = p.position, p.duration
+            self.show_toast(f"{p.title()}   {pos // 60:.0f}:{pos % 60:04.1f}"
+                            + (f" / {dur // 60:.0f}:{dur % 60:04.1f}" if dur else ""))
 
     def on_render(self, time, frame_time):
         self.now = time
@@ -734,7 +865,10 @@ class FractalWindow(mglw.WindowConfig):
         if not self.spin_paused:
             self.spin += (0.03 + 0.1 * amp + 0.6 * self.kick) * frame_time
         self._update_fold(frame_time, tr.vocal)
-        if self.pal_auto and (section or time >= self.pal_next_auto):
+        new_track = self._poll_player()
+        # A new track is a bigger change than a section within one, so it
+        # moves the palette on for the same reason a section change does.
+        if self.pal_auto and (section or new_track or time >= self.pal_next_auto):
             self._go_to_palette(self.pal_idx + 1, PALETTE_FADE_AUTO)
         if self.log and time >= self.log_next:
             self.log_next += LOG_EVERY_S
@@ -794,6 +928,12 @@ class FractalWindow(mglw.WindowConfig):
 
     def on_close(self):
         self.audio.stop()
+        if self.player is not None:
+            # Saved before the quit, while the position can still be read.
+            if self.player_state is not None and self.player.alive:
+                self.player_state.save(self.player.current_path, self.player.position,
+                                       self.player.state.get("volume"))
+            self.player.close()
         if self.log:
             self.log.close()
 

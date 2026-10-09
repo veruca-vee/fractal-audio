@@ -18,6 +18,7 @@ changes. The view is flat and slowly spinning.
 
 - `sequences.py`  — the integer sequences (Fibonacci, Lucas, Pell, bronze, tribonacci, Padovan, Perrin, Jacobsthal, and the two hand-rolled variants), the metallic means and their divergence angles, + the golden-angle spiral walk
 - `phi_paths.py` — the path `c` follows in each of the seven modes, and which map the shader iterates for each
+- `player.py` — mpv as the player engine, over its JSON IPC socket: library scan, playlist, transport, and the resume file
 - `pw_monitor.py` — finds the PipeWire sink whose monitor carries system output
 - `rhythm.py` — the music analysis: levels, onsets, pulse, repeat length, pitch, sections
 - `julia.frag` / `julia.vert` — the GLSL Julia set shader
@@ -131,6 +132,31 @@ If `--device monitor` reports no sinks, PipeWire isn't reachable from the box:
 check that `pw-dump` runs and that `/run/user/1000/pipewire-0` is present
 (distrobox shares the host's runtime dir by default).
 
+## Playing the music from here
+
+Point it at files or folders and it runs the player itself:
+
+```fish
+./venv/bin/python main.py --play ~/Music --shuffle
+```
+
+mpv does the playing, headless, as a subprocess (`player.py`); the visuals
+still listen to the monitor of the default sink, so the capture path is the
+one above, unchanged, and anything else making noise still shows up in the
+fractal. What the player adds is the half the monitor can't see — which file,
+how long, how far in — so a log row says *where in which track* something was
+heard, the session summary ends with the tracks you spent longest on, and a
+new track moves the palette on the way a section change does.
+
+It picks up where the last session stopped (track and position, and the
+volume), unless `--no-resume`. That's kept in `.player_state.json`, which is
+rewritten on quit and is disposable — delete it and you start at the top.
+
+It needs `mpv` on PATH (`sudo apt install mpv`). Without it, or with nothing
+playable under the paths given, it says so on stderr and runs on as normal:
+the visuals work on whatever else is making sound, so a player that won't
+start is no reason to lose the session.
+
 ## Running
 
 ```bash
@@ -155,6 +181,11 @@ It starts fullscreen.
 | `--iters` | `128` | max Julia iterations; lower is faster, higher is more detail |
 | `--fps` | off | print frames per second to stderr every 5 s |
 | `--no-log` | off | don't write a session log to `logs/` |
+| `--play PATH...` | off | play these files/folders with mpv, and (unless `--device` says otherwise) listen to the monitor of system output |
+| `--shuffle` | off | `--play`: shuffle the playlist |
+| `--seed N` | none | `--play`: seed for `--shuffle`, so a shuffle can be repeated |
+| `--volume` | `85` | `--play`: mpv volume, 0–130; omitted, the last session's volume is restored |
+| `--no-resume` | off | `--play`: start at the top instead of where the last session stopped |
 
 Keys while it's running:
 
@@ -176,6 +207,16 @@ Keys while it's running:
 | `c` | pause/resume the spin |
 | `f11` | toggle fullscreen |
 | `esc` | quit |
+
+With `--play`, the transport too:
+
+| Key | Effect |
+|---|---|
+| `m` | play/pause the music. Not `space`, which pauses the path: stopping one while the other keeps going is worth being able to ask for |
+| `n` / `b` | next / previous track |
+| `←` `→` | seek 10 s back / forward |
+| `↑` `↓` | volume, 5% a press |
+| `i` | show what's playing and how far in |
 
 ## What follows what
 
@@ -330,6 +371,7 @@ The session log (`logs/session-*.csv`) has one row every half second: mode,
 fps, pulse, repeat length and confidence, position in the repeat, dominant
 note, section count, hits per second for each layer, the levels, the fold
 count, the power, which map was being iterated, the arm count of the bulb
-c was sitting in (modes 2 and 5) and the palette. The
+c was sitting in (modes 2 and 5), the palette, and — with `--play` — the
+track and how far into it we were. The
 `.summary.txt` next to it is printed when you quit. It's the place to check
 whether the tracker heard what you heard.
