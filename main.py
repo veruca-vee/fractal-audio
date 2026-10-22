@@ -90,6 +90,7 @@ from PIL import Image, ImageDraw, ImageFont
 import moderngl_window as mglw
 import sounddevice as sd
 
+import lyrics
 import overlay
 import phi_paths
 import player
@@ -339,6 +340,7 @@ class FractalWindow(mglw.WindowConfig):
         parser.add_argument("--seed", type=int, default=None, help="--play: seed for --shuffle, so a shuffle can be repeated")
         parser.add_argument("--volume", type=float, default=85.0, help="--play: mpv volume, 0-130")
         parser.add_argument("--no-resume", action="store_true", help="--play: start at the top instead of where the last session stopped")
+        parser.add_argument("--no-lyrics", action="store_true", help="--play: don't fetch or show synced lyrics")
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -413,6 +415,13 @@ class FractalWindow(mglw.WindowConfig):
         self.player_state = None
         self.track_seen = 0
         self.overlay = None
+        self.lyric_line = None
+        self.track_menu = None
+        self.lyrics_on = not self.args.no_lyrics
+        self.lyric_fetcher = lyrics.LyricFetcher()
+        self.lyric_track = None
+        self.lyric_key = None
+        self.lyric_text = ""
         if self.args.play:
             self._start_player()
 
@@ -500,6 +509,8 @@ class FractalWindow(mglw.WindowConfig):
                 pass  # that track isn't in this playlist any more
         p.play_index(start_at, seek=seek)
         self.overlay = overlay.NowPlayingOverlay(self.ctx, self.vbo)
+        self.lyric_line = overlay.LyricLine(self.ctx, self.vbo)
+        self.track_menu = overlay.TrackMenu(self.ctx, self.vbo)
         print(f"--play: {len(tracks)} tracks, starting at {start_at + 1}", file=sys.stderr)
 
     def show_toast(self, text):
@@ -697,6 +708,44 @@ class FractalWindow(mglw.WindowConfig):
             return "", ""
         return self.player.title(), f"{self.player.position:.1f}"
 
+    def _update_lyrics(self):
+        """Keep the lyric line in step with the player.
+
+        Loads run on the fetcher's thread; this only notices a new track,
+        starts its load, collects a finished one, and works out which line
+        the position is inside. A line change is printed, so the run log
+        shows the same words the screen does.
+        """
+        p = self.player
+        if p is None or not p.alive or self.lyric_line is None:
+            return
+        key = p.current_path
+        if key != self.lyric_key:
+            self.lyric_key = key
+            self.lyric_track = None
+            self.lyric_text = ""
+            self.lyric_line.set_line("", self.now)
+            if self.lyrics_on and key is not None:
+                artist, title = lyrics.identity(p)
+                self.lyric_fetcher.want(key, key, artist, title, p.duration)
+        result = self.lyric_fetcher.poll()
+        if result is not None and result[0] == self.lyric_key:
+            self.lyric_track = result[1]
+            if self.lyric_track is not None:
+                print(f"lyrics: {len(self.lyric_track)} lines for {p.title()}",
+                      file=sys.stderr, flush=True)
+            else:
+                print(f"lyrics: none synced for {p.title()}",
+                      file=sys.stderr, flush=True)
+        if self.lyric_track is None:
+            return
+        line = self.lyric_track.line_at(p.position)
+        if line != self.lyric_text:
+            self.lyric_text = line
+            self.lyric_line.set_line(line, self.now)
+            if line:
+                print(f"♪ {line}", file=sys.stderr, flush=True)
+
     def _current_palette(self):
         k = smoothstep((self.now - self.pal_t0) / self.pal_fade)
         return [(1 - k) * a + k * b for a, b in zip(self.pal_from, self.pal_to)]
@@ -774,6 +823,34 @@ class FractalWindow(mglw.WindowConfig):
         keys = self.wnd.keys
         if action != keys.ACTION_PRESS:
             return
+        # The track menu is modal: while it's open it takes the keys,
+        # arrows included (they're volume the rest of the time).
+        tm = self.track_menu
+        if tm is not None and tm.open:
+            p = self.player
+            if key in (keys.TAB, keys.ESCAPE):
+                tm.open = False
+            elif key == keys.UP:
+                tm.move(-1, len(p.tracks))
+            elif key == keys.DOWN:
+                tm.move(1, len(p.tracks))
+            elif key == keys.PAGE_UP:
+                tm.move(-15, len(p.tracks))
+            elif key == keys.PAGE_DOWN:
+                tm.move(15, len(p.tracks))
+            elif key == keys.ENTER:
+                p.play_index(tm.sel)
+                print(f"menu: playing {tm.sel + 1}  {p.tracks[tm.sel].stem}",
+                      file=sys.stderr, flush=True)
+                tm.open = False
+            return
+        if key == keys.TAB:
+            if tm is not None and self.player is not None:
+                if tm.toggle(self.player):
+                    print(f"menu: open, {len(self.player.tracks)} tracks",
+                          file=sys.stderr, flush=True)
+                    self.show_toast("Tracks  (↑↓ pick, Enter plays, Tab closes)")
+            return
         mode_keys = {keys.NUMBER_1: 1, keys.NUMBER_2: 2, keys.NUMBER_3: 3,
                      keys.NUMBER_4: 4, keys.NUMBER_5: 5, keys.NUMBER_6: 6,
                      keys.NUMBER_7: 7}
@@ -785,6 +862,13 @@ class FractalWindow(mglw.WindowConfig):
             self.rabbit = not self.rabbit
             self.show_toast(f"Douady rabbit  c = {RABBIT_C.real:.3f} + {RABBIT_C.imag:.3f}i"
                             if self.rabbit else f"{self.mode}  {MODE_NAMES[self.mode]}")
+        elif key == keys.L:
+            self.lyrics_on = not self.lyrics_on
+            if not self.lyrics_on and self.lyric_line is not None:
+                self.lyric_line.set_line("", self.now)
+            if self.lyrics_on:
+                self.lyric_key = None  # re-check the track that's playing
+            self.show_toast(f"Lyrics  {'on' if self.lyrics_on else 'off'}")
         elif key in (keys.LEFT_BRACKET, keys.RIGHT_BRACKET):
             self.angle += 0.5 if key == keys.RIGHT_BRACKET else -0.5
             self.show_toast(f"Angle  {self.angle:.1f}°" + ("" if self.mode == 1 else "  (mode 1)"))
@@ -919,6 +1003,14 @@ class FractalWindow(mglw.WindowConfig):
         if self.overlay is not None:
             self.overlay.draw(self.player, time, self.wnd.size, self.wnd.buffer_size)
 
+        if self.lyric_line is not None:
+            self._update_lyrics()
+            if self.lyrics_on:
+                self.lyric_line.draw(time, self.wnd.size)
+
+        if self.track_menu is not None:
+            self.track_menu.draw(self.player, self.wnd.size)
+
         remaining = self.toast_until - time
         if self.toast_tex is not None and remaining > 0:
             bw, bh = self.wnd.buffer_size
@@ -935,6 +1027,10 @@ class FractalWindow(mglw.WindowConfig):
         self.audio.stop()
         if self.overlay is not None:
             self.overlay.release()
+        if self.lyric_line is not None:
+            self.lyric_line.release()
+        if self.track_menu is not None:
+            self.track_menu.release()
         if self.player is not None:
             # Saved before the quit, while the position can still be read.
             if self.player_state is not None and self.player.alive:

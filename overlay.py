@@ -22,6 +22,7 @@ what's left of 16 ms after the fractal, which is not much.
 """
 
 import math
+import re
 
 import moderngl
 from PIL import Image, ImageDraw, ImageFont
@@ -347,3 +348,191 @@ class NowPlayingOverlay:
             tex.release()
         if self._text_tex is not None:
             self._text_tex.release()
+
+
+LYRIC_PX = 46            # lyric text size; a caption with presence
+LYRIC_Y = 0.76           # line centre, fraction of window height from the top
+LYRIC_PINK = (255, 105, 205, 255)
+LYRIC_PILL = (10, 0, 12, 165)
+LYRIC_PILL_EDGE = (255, 0, 170, 110)
+
+
+def _lyric_image(text, px=LYRIC_PX):
+    """One lyric line, big and pink on the same dark pill the titles wear,
+    so the words hold up over the brightest part of the fractal."""
+    font = ImageFont.truetype(FONT, px)
+    l, t, r, b = font.getbbox(text)
+    pad_x, pad_y = 26, 14
+    w, h = (r - l) + 2 * pad_x, (b - t) + 2 * pad_y
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, w - 1, h - 1), radius=h // 2, fill=LYRIC_PILL,
+                        outline=LYRIC_PILL_EDGE, width=2)
+    d.text((pad_x - l, pad_y - t), text, font=font, fill=LYRIC_PINK,
+           stroke_width=2, stroke_fill=(40, 0, 30, 255))
+    return img.transpose(Image.FLIP_TOP_BOTTOM)  # GL origin is bottom-left
+
+
+class LyricLine:
+    """The current lyric line, low and centred over the fractal.
+
+    Its own texture, rebuilt only when the line changes -- the discipline
+    the rest of the overlay keeps, since a PIL render per frame would eat
+    the frame budget whole on a weak GPU.
+    """
+
+    def __init__(self, ctx, quad_vbo):
+        self.ctx = ctx
+        self.prog = ctx.program(vertex_shader=QUAD_VERT, fragment_shader=QUAD_FRAG)
+        self.vao = ctx.simple_vertex_array(self.prog, quad_vbo, "in_position")
+        self._text = None
+        self._tex = None
+        self._size = (1, 1)
+        self._set_at = -1e9
+
+    def set_line(self, text, now):
+        if text == self._text:
+            return
+        self._text = text
+        self._set_at = now
+        if self._tex is not None:
+            self._tex.release()
+            self._tex = None
+        if not text:
+            return
+        img = _lyric_image(text)
+        self._tex = self.ctx.texture(img.size, 4, img.tobytes())
+        self._tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._size = img.size
+
+    def draw(self, now, size):
+        """`size` is the window size in pixels, origin top left -- the
+        convention the rest of this module draws in."""
+        if self._tex is None or not self._text:
+            return
+        alpha = min(1.0, (now - self._set_at) / FADE_SECONDS) * 0.97
+        w, h = size
+        tw, th = self._size
+        scale = min(1.0, (0.94 * w) / tw)   # a long line shrinks, never clips
+        tw, th = tw * scale, th * scale
+        cx, cy = w / 2, h * LYRIC_Y
+        x0, y0, x1, y1 = cx - tw / 2, cy - th / 2, cx + tw / 2, cy + th / 2
+        ndc = (2 * x0 / w - 1, 1 - 2 * y1 / h, 2 * x1 / w - 1, 1 - 2 * y0 / h)
+        self.ctx.enable(moderngl.BLEND)
+        self.prog["u_rect"].value = ndc
+        self.prog["u_alpha"].value = alpha
+        self._tex.use(0)
+        self.prog["u_tex"].value = 0
+        self.vao.render(moderngl.TRIANGLE_STRIP)
+        self.ctx.disable(moderngl.BLEND)
+
+    def release(self):
+        if self._tex is not None:
+            self._tex.release()
+
+
+MENU_PX = 20             # track list text size
+MENU_ROW = 30            # row height in the menu texture, px
+MENU_PINK = (255, 105, 205, 255)
+_YT_ID = re.compile(r"\s\[[A-Za-z0-9_-]{11}\]$")
+
+
+def _display_name(path):
+    """A track's menu name: the file stem, minus a YouTube id suffix."""
+    return _YT_ID.sub("", path.stem)
+
+
+def _menu_image(rows, selected, playing):
+    """The track list as one image: a number and a name per row, the
+    selected row lit pink, a marker on the one that's playing.
+
+    Built only when the page or the selection changes -- a 400-track
+    library is a handful of these images, never one per frame.
+    """
+    font = ImageFont.truetype(FONT, MENU_PX)
+    texts = [f"{n:>3}  {name}" for n, name in rows]
+    width = max((font.getbbox(t)[2] for t in texts), default=200) + 52
+    height = MENU_ROW * max(1, len(texts)) + 16
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, width - 1, height - 1), radius=14,
+                        fill=(8, 0, 12, 208), outline=(255, 0, 170, 90), width=2)
+    for i, text in enumerate(texts):
+        y = 8 + i * MENU_ROW
+        if i == selected:
+            d.rounded_rectangle((6, y, width - 7, y + MENU_ROW - 3), radius=8,
+                                fill=(120, 0, 80, 200))
+        mark = ">" if i == playing else " "
+        color = MENU_PINK if i == selected else (235, 225, 240, 255)
+        d.text((14, y + 3), f"{mark} {text}", font=font, fill=color)
+    return img.transpose(Image.FLIP_TOP_BOTTOM)  # GL origin is bottom-left
+
+
+class TrackMenu:
+    """A side panel listing the playlist: TAB opens it, the arrows walk
+    it, Enter plays the selection, TAB or Esc puts it away.
+
+    While it's open it owns the arrow keys (they're volume otherwise);
+    the window's key handler routes accordingly. One texture per page
+    and selection state, rebuilt on change only.
+    """
+
+    def __init__(self, ctx, quad_vbo):
+        self.ctx = ctx
+        self.prog = ctx.program(vertex_shader=QUAD_VERT, fragment_shader=QUAD_FRAG)
+        self.vao = ctx.simple_vertex_array(self.prog, quad_vbo, "in_position")
+        self.open = False
+        self.sel = 0
+        self._page_key = None
+        self._tex = None
+        self._size = (1, 1)
+
+    def toggle(self, player):
+        self.open = not self.open
+        if self.open and player is not None and player.index is not None:
+            self.sel = player.index
+        return self.open
+
+    def move(self, delta, count):
+        if count:
+            self.sel = min(max(0, self.sel + delta), count - 1)
+
+    def draw(self, player, size):
+        """`size` is the window size in pixels, origin top left."""
+        if not self.open or player is None or not player.tracks:
+            return
+        w, h = size
+        tracks = player.tracks
+        rows_fit = max(1, int(h * 0.86) // MENU_ROW)
+        start = (self.sel // rows_fit) * rows_fit
+        chunk = tracks[start:start + rows_fit]
+        playing_here = -1
+        if player.index is not None and start <= player.index < start + len(chunk):
+            playing_here = player.index - start
+        key = (start, self.sel, playing_here, len(tracks))
+        if key != self._page_key:
+            self._page_key = key
+            rows = [(start + i + 1, _display_name(p)) for i, p in enumerate(chunk)]
+            img = _menu_image(rows, self.sel - start, playing_here)
+            if self._tex is not None:
+                self._tex.release()
+            self._tex = self.ctx.texture(img.size, 4, img.tobytes())
+            self._tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            self._size = img.size
+        tw, th = self._size
+        scale = min(1.0, (0.62 * w) / tw, (0.92 * h) / th)
+        tw, th = tw * scale, th * scale
+        x1, y0 = w - 18, h * 0.05
+        x0, y1 = x1 - tw, y0 + th
+        ndc = (2 * x0 / w - 1, 1 - 2 * y1 / h, 2 * x1 / w - 1, 1 - 2 * y0 / h)
+        self.ctx.enable(moderngl.BLEND)
+        self.prog["u_rect"].value = ndc
+        self.prog["u_alpha"].value = 0.97
+        self._tex.use(0)
+        self.prog["u_tex"].value = 0
+        self.vao.render(moderngl.TRIANGLE_STRIP)
+        self.ctx.disable(moderngl.BLEND)
+
+    def release(self):
+        if self._tex is not None:
+            self._tex.release()
