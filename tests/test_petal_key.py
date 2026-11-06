@@ -41,6 +41,7 @@ class PetalKey(unittest.TestCase):
         w.voice_out = 0.0
         w.voice_petals = 5.0
         w.petals_held = None
+        w.track_menu = None   # merged key handler checks the modal track menu first
         w.now = 0.0
 
     def press(self, key):
