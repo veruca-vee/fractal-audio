@@ -174,6 +174,9 @@ MODE6_MIN_LOOP_S = 8.0    # one loop of the Phoenix map's c per bar
 MODE7_MIN_LOOP_S = 7.0    # one orbit of the mandelbar body per bar
 FLOWER_GLIDE = 0.35       # flowers per second toward the one the music picks
 PLL_GAIN = 1.5            # how hard c's phase is pulled onto the music's
+PLL_MAX_SLEW = 0.5        # ...but the pull can never amount to more than
+                          # this fraction of the pace itself: it may steer
+                          # the path onto the grid, never veto its travel
 
 RABBIT_C = complex(-0.123, 0.745)  # the Douady rabbit
 
@@ -588,7 +591,18 @@ class FractalWindow(mglw.WindowConfig):
         cycles) is held to the tracker's cycle phase, so a loop always
         completes on a cycle boundary -- one term or one loop per bar
         lands on the bar, not just at the bar's average rate. Without a
-        clock it runs at the loudness-driven fallback pace."""
+        clock it runs at the loudness-driven fallback pace.
+
+        The pull is capped at a fraction of the pace (PLL_MAX_SLEW).
+        Uncapped, it could match the whole cycle rate on any repeat
+        longer than ~1.3 s, so a phase estimate that stalled -- the
+        tracker does stall; a 2026-11-06 session log has rows a second
+        apart with every value, phase included, identical -- held the
+        path at one point of its cycle indefinitely, replaying a
+        cycle-sized window instead of travelling. Capped, the pull
+        still locks a healthy phase (at the lock it is ~0, far under
+        the cap) and the path is guaranteed at least the rest of its
+        pace whatever the estimate does."""
         if self.paused:
             return
         rate = clock[0] if clock else fallback_loops_per_s
@@ -596,7 +610,9 @@ class FractalWindow(mglw.WindowConfig):
         if clock:
             k = clock[2]
             cyc = (self.path_s[mode] / unit * k) % 1.0
-            step += PLL_GAIN * wrap_half(clock[1] - cyc) * dt / k
+            pull = PLL_GAIN * wrap_half(clock[1] - cyc) / k
+            slew = PLL_MAX_SLEW * rate
+            step += max(-slew, min(slew, pull)) * dt
         self.path_s[mode] += unit * step
 
     def _update_path(self, dt, amp, kick_hit):
