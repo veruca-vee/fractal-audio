@@ -61,6 +61,78 @@ class AutoGain:
         return min(max((x - self.lo) / span, 0.0), 1.0)
 
 
+class BandFlux:
+    """Positive spectral flux inside one band: the mean over its bins of the
+    positive part of log(now) - log(the block before).
+
+    This exists because a band's *level* is the wrong thing to watch for a
+    drum hit when something sustained shares the band. A held bass note sits
+    in the kick's own 40-150 Hz and dominates the mean there, so the kick
+    only lifted the fast-against-slow average by about 0.35 -- half the 0.7
+    it had to clear. Measured: 0 kicks out of 30 with a bassline under them,
+    0 out of 30 in a full mix, and `kick_per_s 0.0` for all 594 s of a real
+    session log. The hats, which have 7-14 kHz to themselves, came through
+    the same mixes fine, so the detector was never the problem -- the
+    masking was. Flux separates them because it measures *change*: a struck
+    drum moves its bins a long way in one block, a held note moves them not
+    at all.
+
+    Two details that are the whole difference between this working and not:
+
+    - **Per bin, not summed**, so the number means the same in the kick's
+      3-bin band as in the snare's 93-bin one and the thresholds can be read
+      against each other.
+    - **The log's floor is a fraction of the mix's own broadband level**, not
+      a constant. With a constant floor, a band holding nothing but noise --
+      40-150 Hz under a guitar chord with no bass in it -- has its three bins
+      swinging over orders of magnitude, and the log ratios invent a beat out
+      of it: measured, 87 kicks in 30 s of held chord. Flooring at the
+      broadband level means a bin far below the mix contributes almost
+      nothing when it wobbles, while a bin at or above it still reads
+      logarithmically. Because both terms scale with the signal, the result
+      stays volume independent -- the same kick scores the same flux 0.1x and
+      4x louder, measured identical to three decimals -- which is why the
+      thresholds below can be fixed numbers with no AutoGain in front.
+    """
+
+    def __init__(self, mask=None):
+        self.mask = mask
+        self.prev = None
+
+    def __call__(self, spec, floor):
+        cur = np.log(spec[self.mask] + floor)
+        if self.prev is None:
+            self.prev = cur
+            return 0.0
+        flux = float(np.maximum(cur - self.prev, 0.0).mean())
+        self.prev = cur
+        return flux
+
+
+class TransientDetector:
+    """Fires when a flux reading clears `threshold`, then stays quiet for
+    `refractory` blocks.
+
+    No fast-against-slow average here, unlike OnsetDetector: flux is already
+    a difference, so comparing it to its own recent average would subtract
+    the change twice and is what masking the kick looked like in the first
+    place. A fixed threshold is sound because BandFlux is volume
+    independent.
+    """
+
+    def __init__(self, threshold, refractory):
+        self.threshold = threshold
+        self.refractory = refractory
+        self.since = 10 ** 6
+
+    def update(self, flux, extra_ok=True):
+        self.since += 1
+        if flux > self.threshold and extra_ok and self.since >= self.refractory:
+            self.since = 0
+            return True
+        return False
+
+
 class OnsetDetector:
     """Fires when a fast average of some log-energy jumps `jump` above its
     slow average, then stays quiet for `refractory` blocks."""
@@ -121,9 +193,19 @@ class MusicTracker:
 
         # onset counters; the render loop watches them change
         self.n_kick = self.n_snare = self.n_hat = self.n_bass = 0
-        self._kick = OnsetDetector(0.7, 7)
-        self._snare_lo = OnsetDetector(0.5, 6)
-        self._snare_hi = OnsetDetector(0.5, 6)
+        # The drums watch flux, not level: a bassline shares the kick's band
+        # and a guitar shares the snare's, and both mask the level outright
+        # (see BandFlux). Every threshold here sits in a measured gap
+        # between the band with the hit in it and the same band without:
+        # with the hit in it and the same band without it.
+        self._kick = TransientDetector(0.50, 7)
+        self._snare = TransientDetector(0.50, 6)
+        self._kick_flux = BandFlux()    # masks set below, once freqs exist
+        self._snare_lo_flux = BandFlux()
+        self._snare_hi_flux = BandFlux()
+        # The snare still needs a low-mid crack AND a high one together, so
+        # it means "broadband hit" and not "a cymbal" or "a guitar note".
+        self.SNARE_LO_FLUX = 0.22
         self._hat = OnsetDetector(0.6, 3)
         self._bassnote = OnsetDetector(0.6, 8)
 
@@ -132,6 +214,9 @@ class MusicTracker:
         self._env = deque(maxlen=n)
         self._prev_log = None
         self._flux_mask = (self.freqs >= 40) & (self.freqs < 10000)
+        self._kick_flux.mask = (self.freqs >= 40) & (self.freqs < 150)
+        self._snare_lo_flux.mask = (self.freqs >= 150) & (self.freqs < 400)
+        self._snare_hi_flux.mask = (self.freqs >= 2000) & (self.freqs < 6000)
         self.pulse_s = 0.0
         self.cycle_len = 0        # in pulses; 0 until it has enough music to say
         self.cycle_conf = 0.0     # 0..1
@@ -186,10 +271,13 @@ class MusicTracker:
             setattr(self, name, s * getattr(self, name) + (1 - s) * self._gain[name](v))
 
         # onsets
-        if self._kick.update(band(40, 150)):
+        # The flux floor: the mix's own broadband level, so a band carrying
+        # nothing but noise cannot invent a hit out of it (see BandFlux).
+        floor = float(np.mean(spec[self._flux_mask])) + 1e-12
+        if self._kick.update(self._kick_flux(spec, floor)):
             self.n_kick += 1
-        lo_ok = self._snare_lo.excess(band(150, 400)) > self._snare_lo.jump
-        if self._snare_hi.update(band(2000, 6000), extra_ok=lo_ok):
+        lo_ok = self._snare_lo_flux(spec, floor) > self.SNARE_LO_FLUX
+        if self._snare.update(self._snare_hi_flux(spec, floor), extra_ok=lo_ok):
             self.n_snare += 1
         if self._hat.update(band(7000, 14000)):
             self.n_hat += 1
