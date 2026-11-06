@@ -570,26 +570,33 @@ class FractalWindow(mglw.WindowConfig):
         return hits["kick"], hits["section"]
 
     def _music_clock(self, min_loop_s):
-        """(loops per second, phase to lock to or None) when the music has a
-        steady repeat to follow, else None. A repeat shorter than min_loop_s
-        is stretched to a whole number of repeats."""
+        """(loops per second, cycle phase, repeats per loop) when the music
+        has a steady repeat to follow, else None. A repeat shorter than
+        min_loop_s is stretched to a whole number of repeats -- a bar of
+        k repeats -- and the phase is the tracker's position in its
+        cycle, which is what the path locks to (see _advance)."""
         tr = self.tr
         if not tr.cycle_len or tr.cycle_conf < CLOCK_MIN_CONF or tr.cycle_seconds < 0.3:
             return None
         k = max(1, math.ceil(min_loop_s / tr.cycle_seconds))
-        return 1.0 / (k * tr.cycle_seconds), (tr.cycle_phase if k == 1 else None)
+        return 1.0 / (k * tr.cycle_seconds), tr.cycle_phase, k
 
     def _advance(self, mode, unit, clock, fallback_loops_per_s, dt):
         """Move a mode's path position. It runs at the music's pace when
-        there's a clock (and, if the repeat is a single loop, is pulled onto
-        the music's phase), else at the loudness-driven fallback pace."""
+        there's a clock, and is pulled onto the music's cycle grid: the
+        path's position within its current cycle (one loop spans k
+        cycles) is held to the tracker's cycle phase, so a loop always
+        completes on a cycle boundary -- one term or one loop per bar
+        lands on the bar, not just at the bar's average rate. Without a
+        clock it runs at the loudness-driven fallback pace."""
         if self.paused:
             return
         rate = clock[0] if clock else fallback_loops_per_s
         step = rate * dt
-        if clock and clock[1] is not None:
-            frac = (self.path_s[mode] / unit) % 1.0
-            step += PLL_GAIN * wrap_half(clock[1] - frac) * dt
+        if clock:
+            k = clock[2]
+            cyc = (self.path_s[mode] / unit * k) % 1.0
+            step += PLL_GAIN * wrap_half(clock[1] - cyc) * dt / k
         self.path_s[mode] += unit * step
 
     def _update_path(self, dt, amp, kick_hit):
@@ -660,11 +667,17 @@ class FractalWindow(mglw.WindowConfig):
             clock = self._music_clock(MODE5_MIN_STEP_S)
             if not self.paused:
                 self.farey_kicks += kick_hit
-                self.farey_f += (clock[0] if clock else 0.12 + 0.4 * loud) * dt
-                while self.farey_f >= 1.0:
-                    self.farey_f -= 1.0
-                    self.farey.step(self.farey_kicks % 2 == 1)
-                    self.farey_kicks = 0
+            # The bar itself is path_s[5], advanced by the same clocked
+            # _advance as every other mode, so the branch lands on the
+            # bar's boundary instead of wherever a free-running glide
+            # happened to wrap; farey_f is the fraction of the bar the
+            # glide between the two mediants still has to cross.
+            before = self.path_s[5]
+            self._advance(5, 1.0, clock, 0.12 + 0.4 * loud, dt)
+            self.farey_f = self.path_s[5] % 1.0
+            for _ in range(int(self.path_s[5]) - int(before)):
+                self.farey.step(self.farey_kicks % 2 == 1)
+                self.farey_kicks = 0
             self.flower_arms = self.farey.arms
             c, fixed_point = self.farey.c(self.farey_f, 0.5 * amp + 1.3 * self.kick)
             return c, 2, fixed_point, 0.7
