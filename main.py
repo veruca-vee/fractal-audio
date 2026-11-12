@@ -845,6 +845,9 @@ class FractalWindow(mglw.WindowConfig):
         are the slow shape, so they carry most of the travel."""
         ease = min(dt * FOLD_EASE, 1.0)
         self.density_slow += (density - self.density_slow) * ease
+        # getattr: windows built without __init__ (tests, probes) may not
+        # carry the fold's vocal state yet; it starts at rest, like the rest.
+        self.fold_vocal_slow = getattr(self, "fold_vocal_slow", 0.0)
         self.fold_vocal_slow += (vocal - self.fold_vocal_slow) * ease
         target = 1 + int(round(self.fold_amount() * (FOLD_MAX - 1)))
         if self.fold_mix < 1.0:
@@ -864,7 +867,7 @@ class FractalWindow(mglw.WindowConfig):
         travelling instead of pinned at the top."""
         density_share = min(max((self.density_slow - FOLD_DENSITY_LO)
                                 / (FOLD_DENSITY_HI - FOLD_DENSITY_LO), 0.0), 1.0)
-        vocal_share = min(max((self.fold_vocal_slow - FOLD_VOCAL_LO)
+        vocal_share = min(max((getattr(self, "fold_vocal_slow", 0.0) - FOLD_VOCAL_LO)
                               / (FOLD_VOCAL_HI - FOLD_VOCAL_LO), 0.0), 1.0)
         blend = (FOLD_VOCAL_WEIGHT * vocal_share
                  + (1.0 - FOLD_VOCAL_WEIGHT) * density_share)
