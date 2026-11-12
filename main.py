@@ -831,7 +831,7 @@ class FractalWindow(mglw.WindowConfig):
         self.pal_fade = fade
         self.pal_next_auto = self.now + PALETTE_AUTO_SECONDS
 
-    def _update_fold(self, dt, density, vocal=0.0):
+    def _update_fold(self, dt, density, vocal=None):
         """How full the arrangement is, and whether the voice is up in it,
         set the fold count; each change crossfades from the old one. A
         sparse verse stays whole and a dense chorus with the voice up
@@ -843,6 +843,12 @@ class FractalWindow(mglw.WindowConfig):
         property of the track's mix, not of the moment, and measured on
         real tracks it holds one value for minutes. The voice's phrases
         are the slow shape, so they carry most of the travel."""
+        if vocal is None:
+            # No explicit level: take the tracker's, the way the live
+            # caller means it, so headless drivers that replay tracker
+            # readings through this method exercise the same driver the
+            # app uses. No tracker either means voice at rest.
+            vocal = getattr(getattr(self, "tr", None), "vocal", 0.0)
         ease = min(dt * FOLD_EASE, 1.0)
         self.density_slow += (density - self.density_slow) * ease
         # getattr: windows built without __init__ (tests, probes) may not
