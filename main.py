@@ -119,11 +119,21 @@ PALETTE_FADE_AUTO = 4.0
 PALETTE_FADE_KEY = 0.8
 
 # The voice's own shape (julia.frag's orbit trap). Vocals used to drive the
-# fold count, which is the one real mismatch in the mapping: a fold count is
+# fold count alone, which was a mismatch in the mapping: a fold count is
 # a discrete global symmetry and a voice is a continuous melodic line, so
 # singing read as "the screen occasionally reconfigures". The shape is
-# continuous and it moves, which is what a line deserves; the fold goes to
-# the arrangement's density, where a discrete count belongs.
+# continuous and it moves, which is what a line deserves.
+#
+# The fold itself is shared (see _update_fold): the arrangement's density
+# sets its floor and part of its reach, and the voice's phrase-level
+# presence does the rest. Density alone turned out to be a near-constant
+# per track -- measured with rhythm.py's own tracker, dense rock sits at
+# 0.70-0.74 for minutes at a time -- so driving the fold from density
+# alone pinned it at the top within seconds and left a static spiral
+# that only bumped with the kick. The voice is the layer that actually
+# rises and falls phrase by phrase, so it has to be in the fold's
+# driver; smoothed at phrase scale, it moves the count the way a
+# section change does rather than reconfiguring the screen per syllable.
 VOICE_IN = 0.30           # vocal level where the shape starts to appear...
 VOICE_FULL = 0.75         # ...and where it is fully out
 VOICE_EASE = 2.5          # per second, how fast it comes and goes
@@ -134,6 +144,20 @@ PETAL_CHOICES = (2, 3, 4, 5, 6, 8, 12)
 FOLD_MAX = 6        # most copies the arrangement can split the fractal into
 FOLD_HOLD = 0.3     # min seconds between fold-count changes, so it doesn't flicker
 FOLD_FADE = 0.3     # crossfade time for each change
+FOLD_EASE = 0.5     # per second, smoothing for both fold drivers: a ~2 s
+                    # time constant, so the fold follows phrases and
+                    # sections, and can never slam open in the first
+                    # seconds of a track
+FOLD_VOCAL_LO = 0.30    # phrase-smoothed vocal level where the voice's
+FOLD_VOCAL_HI = 0.75    # share of the fold starts / is full
+FOLD_DENSITY_LO = 0.45  # density where the arrangement's share starts...
+FOLD_DENSITY_HI = 0.85  # ...and is full (sparse tracks sit ~0.5, dense
+                        # rock ~0.70-0.75, so the old 0.35-0.70 window
+                        # saturated on exactly the tracks that are full)
+FOLD_VOCAL_WEIGHT = 0.65    # the voice carries most of the fold's travel
+FOLD_DENSITY_FLOOR = 0.55   # density on its own can carry fold_amount()
+                            # this far -- a floor under a dense
+                            # instrumental, never the pinned top
 
 MODE_NAMES = {
     1: "Sequence drift", 2: "Fibonacci flowers", 3: "Fibonacci powers",
@@ -475,6 +499,7 @@ class FractalWindow(mglw.WindowConfig):
         self.scene_fbo = None
 
         self.density_slow = 0.0
+        self.fold_vocal_slow = 0.0  # vocal level at the fold's phrase scale
         self.voice_out = 0.0      # how far the voice's shape has emerged
         self.voice_petals = 5.0
         self.petals_held = None   # a count held by hand with `k`; None = auto
@@ -806,12 +831,21 @@ class FractalWindow(mglw.WindowConfig):
         self.pal_fade = fade
         self.pal_next_auto = self.now + PALETTE_AUTO_SECONDS
 
-    def _update_fold(self, dt, density):
-        """How full the arrangement is sets the fold count; each change
-        crossfades from the old one. A sparse verse stays whole and a dense
-        chorus splits into up to six copies, which is a discrete count
-        following a slow-moving structural quantity rather than a melody."""
-        self.density_slow += (density - self.density_slow) * min(dt * 3.0, 1.0)
+    def _update_fold(self, dt, density, vocal):
+        """How full the arrangement is, and whether the voice is up in it,
+        set the fold count; each change crossfades from the old one. A
+        sparse verse stays whole and a dense chorus with the voice up
+        splits into up to six copies.
+
+        Both drivers are smoothed at phrase scale (FOLD_EASE). The count
+        is discrete and structural, so it follows the slow shape of the
+        music -- but density on its own barely has a slow shape: it is a
+        property of the track's mix, not of the moment, and measured on
+        real tracks it holds one value for minutes. The voice's phrases
+        are the slow shape, so they carry most of the travel."""
+        ease = min(dt * FOLD_EASE, 1.0)
+        self.density_slow += (density - self.density_slow) * ease
+        self.fold_vocal_slow += (vocal - self.fold_vocal_slow) * ease
         target = 1 + int(round(self.fold_amount() * (FOLD_MAX - 1)))
         if self.fold_mix < 1.0:
             self.fold_mix = min(1.0, self.fold_mix + dt / FOLD_FADE)
@@ -822,8 +856,19 @@ class FractalWindow(mglw.WindowConfig):
             self.fold_changed_at = self.now
 
     def fold_amount(self):
-        """0 for a bass-and-drums verse, 1 for a full arrangement."""
-        return min(max((self.density_slow - 0.35) / 0.35, 0.0), 1.0)
+        """0 for a bass-and-drums verse, 1 for a full arrangement with
+        the voice up. The arrangement's share runs over a wide window
+        (sparse ~0.5, dense ~0.7-0.85 in practice) and on its own only
+        reaches FOLD_DENSITY_FLOOR; the rest of the way needs the
+        voice's phrases, which is what keeps a dense track's fold
+        travelling instead of pinned at the top."""
+        density_share = min(max((self.density_slow - FOLD_DENSITY_LO)
+                                / (FOLD_DENSITY_HI - FOLD_DENSITY_LO), 0.0), 1.0)
+        vocal_share = min(max((self.fold_vocal_slow - FOLD_VOCAL_LO)
+                              / (FOLD_VOCAL_HI - FOLD_VOCAL_LO), 0.0), 1.0)
+        blend = (FOLD_VOCAL_WEIGHT * vocal_share
+                 + (1.0 - FOLD_VOCAL_WEIGHT) * density_share)
+        return max(FOLD_DENSITY_FLOOR * density_share, blend)
 
     def _cycle_petals(self):
         """Step the vocal shape's petal count on by hand, for auditioning.
@@ -1044,7 +1089,7 @@ class FractalWindow(mglw.WindowConfig):
 
         if not self.spin_paused:
             self.spin += (0.03 + 0.1 * amp + 0.6 * self.kick) * frame_time
-        self._update_fold(frame_time, tr.density)
+        self._update_fold(frame_time, tr.density, tr.vocal)
         self._update_voice(frame_time)
         new_track = self._poll_player()
         # A new track is a bigger change than a section within one, so it

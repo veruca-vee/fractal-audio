@@ -246,7 +246,7 @@ recent low and high) so it swings across 0..1 on any track at any volume.
 | Hats | 7–14 kHz onsets | fine contour lines flick through the escape-time bands (and ripple the stalks inside the set) |
 | Bass notes | 60–250 Hz onsets | swirl: twist the picture into spiral arms |
 | Bass level | 20–250 Hz level | breathes the zoom |
-| Vocals | 300–3400 Hz relative to the lows and highs | past a threshold, fold the fractal into up to 6 copies twisted into spirals |
+| Vocals | 300–3400 Hz relative to the lows and highs | the voice's own orbit-trap shape (below); and, smoothed at phrase scale, the voice opens the fold — with the arrangement's density setting its floor — into up to 6 copies twisted into spirals |
 | Pitch | dominant pitch class of 80–1000 Hz | shifts the palette's hue, moving the short way round the circle |
 | Loudness | RMS | speed of c's path when there's no steady repeat to follow |
 | Repeat length | autocorrelation of the onset envelope, in pulses | the pace of c's path: modes 1 and 4 step one sequence term per bar, modes 3, 6 and 7 make one loop per bar, mode 5 takes one Stern-Brocot branch per bar, and mode 2 picks the flower whose arm count is nearest |
@@ -364,10 +364,16 @@ shows up in only a few sections.
   rate; kicks drive it past the band, where the flames break into embers.
 - Zoom cycles every 24 s between each mode's base framing and 1.8× wider;
   bass breathes it in and kicks punch it in.
-- Vocals: once the voice stands out it sets a fold count from 1 to 6: the
-  plane is mirrored into that many wedges, each holding a smaller copy
-  pushed out into a ring, then twisted by log(r) into spiral arms. Changes
-  crossfade.
+- Vocals: the voice has its own shape (an orbit trap on a rose curve), and
+  it also shares the fold count, 1 to 6: the plane is mirrored into that
+  many wedges, each holding a smaller copy pushed out into a ring, then
+  twisted by log(r) into spiral arms. The fold's driver is the voice's
+  phrase-smoothed level blended with the arrangement's density, which
+  sets a floor the voice builds on. Density alone held the fold pinned
+  at 6 on dense tracks (it is a property of a track's mix, not of the
+  moment — 0.70–0.74 for minutes at a time on measured rock), so it is
+  capped at a floor; the voice's phrases carry the rest of the travel.
+  Changes crossfade.
 - Color: cosine palettes that crossfade. Hue tracks escape-time + mid-band
   energy, saturation tracks treble, value tracks escape-time, bass, and
   overall amplitude. The inside of the set is colored by how close each
@@ -379,9 +385,10 @@ If it stutters, drop `--scale` to `0.6` or `--iters` to `96` first.
 
 The onset detectors and their thresholds are in `rhythm.py` (`MusicTracker.__init__`):
 the first number in each `OnsetDetector(jump, refractory)` is how far above
-its recent average a band must jump, so higher means fewer hits. If vocals
-split the fractal too eagerly, raise the 0.45 threshold in `vocal_split()`
-in `main.py`.
+its recent average a band must jump, so higher means fewer hits. If the fold
+splits the fractal too eagerly or not eagerly enough, the windows are the
+`FOLD_VOCAL_*` / `FOLD_DENSITY_*` constants in `main.py`; `FOLD_EASE` is how
+fast it can travel at all.
 
 The session log (`logs/session-*.csv`) has one row every half second: mode,
 fps, pulse, repeat length and confidence, position in the repeat, dominant
