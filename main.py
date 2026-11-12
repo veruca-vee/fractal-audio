@@ -831,7 +831,7 @@ class FractalWindow(mglw.WindowConfig):
         self.pal_fade = fade
         self.pal_next_auto = self.now + PALETTE_AUTO_SECONDS
 
-    def _update_fold(self, dt, density, vocal):
+    def _update_fold(self, dt, density, vocal=0.0):
         """How full the arrangement is, and whether the voice is up in it,
         set the fold count; each change crossfades from the old one. A
         sparse verse stays whole and a dense chorus with the voice up
